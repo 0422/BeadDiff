@@ -24,7 +24,10 @@ def product_rows(product: Product) -> list[list[str]]:
         rows.append([
             product.main_code, product.title, product.currency.upper(),
             "，".join(product.images) if index == 0 else "", product.source_url, product.source, product.source_id,
-            product.description if index == 0 else "", "，".join(product.detail_images) if index == 0 else "",
+            # product.description if index == 0 else "", "，".join(product.detail_images) if index == 0 else "",
+            # 2026-10-11：本次修改原因：详情描述优先导出图文 HTML，旧商品人工清空后不恢复摘要。
+            (product.description_html if product.description_html or "description_html" in product.manual_fields
+             else product.description) if index == 0 else "", "，".join(product.detail_images) if index == 0 else "",
             product.category, "；".join(f"{key}:{value}" for key, value in product.attributes.items()),
             product.video, product.certificate, product.size_chart,
             sku.spec1, sku.spec2, sku.platform_sku, sku.price, sku.image, sku.stock, sku.weight, sku.dimensions,

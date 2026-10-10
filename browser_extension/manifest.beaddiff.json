@@ -1,0 +1,94 @@
+{
+  "manifest_version": 3,
+  "name": "跨境ERP助手",
+  "description": "跨境ERP助手，支持采集100+货源平台商品，批量发布至数十家跨境电商平台店铺，支持一键代发采购，自动关联并同步采购单至货代系统",
+  "version": "5.0.9",
+  "icons": {
+    "16": "icon/earth-16.png",
+    "24": "icon/earth-24.png",
+    "48": "icon/earth-48.png",
+    "128": "icon/earth-128.png"
+  },
+  "permissions": [
+    "tabs",
+    "storage",
+    "scripting",
+    "declarativeNetRequest",
+    "webRequest",
+    "management",
+    "unlimitedStorage",
+    "cookies",
+    "alarms"
+  ],
+  "externally_connectable": {
+    "matches": [
+      "*://localhost/*",
+      "*://*.szchengji-inc.com/*",
+      "*://*.chengji-inc.com/*",
+      "*://*.kuajing-plw.happyporsche.com/*",
+      "*://*.91miaoshou.com/*"
+    ]
+  },
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "injected.js",
+        "env.json",
+        "content-scripts/content.css",
+        "rules.json",
+        "icon/*"
+      ],
+      "matches": [
+        "<all_urls>"
+      ]
+    }
+  ],
+  "declarative_net_request": {
+    "rule_resources": [
+      {
+        "id": "ruleset_1",
+        "enabled": true,
+        "path": "rules.json"
+      }
+    ]
+  },
+  "action": {
+    "default_title": "跨境ERP助手",
+    "default_icon": "icon/earth-16.png"
+  },
+  "background": {
+    "service_worker": "beaddiff-worker.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "<all_urls>"
+      ],
+      "all_frames": true,
+      "run_at": "document_end",
+      "js": [
+        "content-scripts/content.js"
+      ]
+    },
+    {
+      "matches": [
+        "<all_urls>"
+      ],
+      "all_frames": true,
+      "run_at": "document_start",
+      "js": [
+        "content-scripts/start.js"
+      ]
+    }
+  ],
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAm0xvIIHKojAuKi6hDzSXk08CoaaVVcZohhhKYVw/n/unXFnPxztMonajOC2lGe/nRqJjjLmkjc5cEpaQzimEYYgt5z9RYWp0wBYmec2RzHalGVOcUSswm4v4wgF1mWuN5q35fh3WYCdSVOVF5IXu8apCbteLGoMBn+ixzzRDsWSxZE4hZDnEzu7iX285SNAYje9ChPPVZuVDGqMwRFOc/rPPFe+Rndr6RgbS6WQkmf2iQ7A1XBL6U7qIz9OUUFHLPzIb8AD0wckoE17ylWOxseKICvdq+x3HYd+Ka1qSChaY9rIuDl0/sp0Za/c6mgmbu1oQzPAmez++tWPY5WIdlwIDAQAB",
+  "options_ui": {
+    "page": "beaddiff-options.html",
+    "open_in_tab": true
+  },
+  "options_page": "beaddiff-options.html",
+  "minimum_chrome_version": "120"
+}

@@ -7,7 +7,9 @@ from typing import Callable
 from PySide6.QtCore import QObject, QRunnable, Qt, QUrl, Signal
 from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
-from PySide6.QtWidgets import QFrame, QLabel, QPushButton, QVBoxLayout
+# from PySide6.QtWidgets import QFrame, QLabel, QPushButton, QVBoxLayout
+# 2026-10-11：本次修改原因：增加分页缩略图，便于核对主图和详情图数量及内容。
+from PySide6.QtWidgets import QFrame, QGridLayout, QHBoxLayout, QLabel, QPushButton, QVBoxLayout
 
 
 def icon(name: str, color: str = "#70888d") -> QIcon:
@@ -105,6 +107,9 @@ class Task(QRunnable):
 
 
 class ImagePreview(QLabel):
+    # 2026-10-11：本次修改原因：图片加载后提供真实像素尺寸，支持商品图片尺寸核对。
+    dimensionsLoaded = Signal(int, int)
+
     def __init__(self, network: QNetworkAccessManager, height: int = 195):
         super().__init__("暂无图片")
         self.network = network
@@ -117,9 +122,13 @@ class ImagePreview(QLabel):
         self._buffer = bytearray()
 
     def set_url(self, url: str) -> None:
-        if self._reply:
-            self._reply.abort()
+        # if self._reply:
+        #     self._reply.abort()
+        # 2026-10-11：本次修改原因：先解除旧请求关联，避免取消请求的回调影响新图片。
+        previous = self._reply
         self._reply = None
+        if previous:
+            previous.abort()
         self._pixmap = None
         self.clear()
         self.setToolTip(url)
@@ -133,6 +142,8 @@ class ImagePreview(QLabel):
                              QNetworkRequest.RedirectPolicy.NoLessSafeRedirectPolicy)
         self._buffer = bytearray()
         reply = self.network.get(request)
+        # 2026-10-11：本次修改原因：预览控件销毁时一并销毁请求，避免缩略图关闭后回调已销毁的控件。
+        reply.setParent(self)
         self._reply = reply
         reply.readyRead.connect(lambda: self._read(reply))
         reply.finished.connect(lambda: self._finish(reply))
@@ -150,6 +161,7 @@ class ImagePreview(QLabel):
             pixmap = QPixmap()
             if reply.error() == QNetworkReply.NetworkError.NoError and pixmap.loadFromData(bytes(self._buffer)):
                 self._pixmap = pixmap
+                self.dimensionsLoaded.emit(pixmap.width(), pixmap.height())
                 self._fit()
             else:
                 self.setText("图片暂时无法加载\n可在编辑页核对链接")
@@ -165,3 +177,95 @@ class ImagePreview(QLabel):
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         self._fit()
+
+
+# 2026-10-11：本次修改原因：分组展示采集图片，进入页签才加载，每页六张控制并发和界面长度。
+class ImageGallery(QFrame):
+    PAGE_SIZE = 6
+    # 2026-10-11：本次修改原因：图库把真实图片尺寸传给对应图片列表，补齐材料缺少的像素信息。
+    sizeLoaded = Signal(str, int, int)
+
+    def __init__(self, network: QNetworkAccessManager):
+        super().__init__()
+        self.network = network
+        self.urls: list[str] = []
+        self.page = 0
+        self.loaded = False
+        self.previews: list[ImagePreview] = []
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        actions = QHBoxLayout()
+        self.count = label("共 0 张", "hint")
+        actions.addWidget(self.count)
+        actions.addStretch()
+        self.previous = button("上一页", lambda: self.move_page(-1))
+        self.next = button("下一页", lambda: self.move_page(1))
+        actions.addWidget(self.previous)
+        actions.addWidget(self.next)
+        layout.addLayout(actions)
+        self.grid = QGridLayout()
+        self.grid.setSpacing(12)
+        layout.addLayout(self.grid)
+        self.set_urls([])
+
+    def set_urls(self, urls: list[str]) -> None:
+        unique = list(dict.fromkeys(url for url in urls if url))
+        if unique == self.urls and self.loaded:
+            return
+        self.urls = unique
+        self.page = 0
+        self.loaded = False
+        self._counts()
+        if self.isVisible():
+            self._render()
+
+    def _counts(self) -> None:
+        pages = max(1, (len(self.urls) + self.PAGE_SIZE - 1) // self.PAGE_SIZE)
+        self.count.setText(f"共 {len(self.urls)} 张  ·  第 {self.page + 1}/{pages} 页")
+        self.previous.setEnabled(self.page > 0)
+        self.next.setEnabled(self.page + 1 < pages)
+
+    def move_page(self, step: int) -> None:
+        pages = max(1, (len(self.urls) + self.PAGE_SIZE - 1) // self.PAGE_SIZE)
+        self.page = max(0, min(pages - 1, self.page + step))
+        self._render()
+
+    def _render(self) -> None:
+        from ..models import valid_url
+
+        for preview in self.previews:
+            preview.set_url("")
+        self.previews.clear()
+        while self.grid.count():
+            item = self.grid.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        start = self.page * self.PAGE_SIZE
+        for index, url in enumerate(self.urls[start:start + self.PAGE_SIZE]):
+            tile = QFrame()
+            contents = QVBoxLayout(tile)
+            contents.setContentsMargins(0, 0, 0, 0)
+            preview = ImagePreview(self.network, 125)
+            preview.set_url(url if valid_url(url) else "")
+            self.previews.append(preview)
+            contents.addWidget(preview)
+            caption = label(f"第 {start + index + 1} 张", "muted")
+            # 2026-10-11：本次修改原因：缩略图加载后显示像素尺寸，而非只显示序号。
+            preview.dimensionsLoaded.connect(
+                lambda width, height, caption=caption, number=start + index + 1, url=url:
+                self._image_size(caption, number, url, width, height))
+            caption.setToolTip(url)
+            contents.addWidget(caption)
+            self.grid.addWidget(tile, index // 3, index % 3)
+        self.loaded = True
+        self._counts()
+
+    # 2026-10-11：本次修改原因：像素尺寸只来自实际解码的图片，不作为物流尺寸。
+    def _image_size(self, caption: QLabel, number: int, url: str, width: int, height: int) -> None:
+        caption.setText(f"第 {number} 张 · {width} × {height}")
+        self.sizeLoaded.emit(url, width, height)
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        if not self.loaded:
+            self._render()

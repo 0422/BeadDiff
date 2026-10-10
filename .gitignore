@@ -8,4 +8,6 @@ data/
 dist/
 build/
 *.spec
+# 2026-10-11：本次修改原因：开发版插件副本含第三方原程序，仅版本管理自写的分支文件。
+browser_extension/unpacked*/
 

@@ -1,0 +1,39 @@
+<!doctype html>
+<!-- 2026-10-11：本次修改原因：提供独立连接设置与同步状态页，保留妙手工具栏的原入口。 -->
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>BeadDiff · 采集同步设置</title>
+  <link rel="stylesheet" href="beaddiff-options.css">
+</head>
+<body>
+  <main>
+    <header><div class="brand">BD</div><div><h1>采集同步到 BeadDiff</h1><p>保留妙手采集流程，同时将商品材料同步到本机工作台。</p></div></header>
+    <section class="card">
+      <div class="section-heading"><h2>本机连接</h2><span id="connection-state" class="badge">正在读取配置</span></div>
+      <p class="hint">打开 BeadDiff 的「连接设置」，将接收地址和接入密钥复制到下面。</p>
+      <form id="settings-form">
+        <label for="endpoint">接收地址</label><input id="endpoint" type="url" spellcheck="false" required placeholder="http://127.0.0.1:18765/api/v1/captures">
+        <label for="token">接入密钥</label><div class="input-row"><input id="token" type="password" autocomplete="off" spellcheck="false" required placeholder="从 BeadDiff 复制，不是妙手账号密码"><button id="show-token" type="button" class="secondary">显示</button></div>
+        <label class="checkbox"><input id="enabled" type="checkbox">启用采集同步</label>
+        <p class="hint">本机软件未打开时，已启用的同步会将材料保留在扩展队列，连接恢复后重试。关闭同步只停止新增材料与发送，不清除已有队列。</p>
+        <div class="actions"><button id="save" type="submit">保存设置</button><button id="test" type="button" class="secondary">测试连接</button></div>
+      </form>
+      <p id="message" role="status" aria-live="polite" hidden></p>
+    </section>
+    <section class="card">
+      <div class="section-heading"><h2>同步状态</h2><div class="actions"><button id="refresh" type="button" class="secondary">刷新</button><button id="retry" type="button" class="secondary">立即重试</button></div></div>
+      <div class="metrics"><div><span>待同步</span><strong id="pending">0</strong></div><div><span>已确认接收</span><strong id="delivered">0</strong></div><div><span>暂存空间</span><strong id="bytes">0 MB</strong></div></div>
+      <p id="last-state" class="hint">尚未同步商品。</p>
+      <p id="last-error" class="notice" hidden></p>
+      <p id="missed" class="notice" hidden></p>
+      <div class="table-wrap"><table><thead><tr><th>商品 ID</th><th>来源</th><th>入队时间</th><th>尝试</th><th>状态 / 原因</th></tr></thead><tbody id="jobs"></tbody></table></div>
+      <p id="empty" class="empty">暂无待同步材料。启用同步后，在 Temu 页面重新采集一个商品。</p>
+      <p class="hint">队列最多暂存 100 条 / 256 MB，列表显示前 20 条。重试期间保持浏览器打开；不要清除扩展数据或卸载带有待同步记录的扩展。</p>
+    </section>
+    <footer>本页只管理 BeadDiff 同步。妙手登录、采集箱和发布功能仍使用原插件入口。</footer>
+  </main>
+  <script src="beaddiff-options.js"></script>
+</body>
+</html>

@@ -7,6 +7,8 @@ from html.parser import HTMLParser
 from typing import Any
 
 from .models import Product, SKU, valid_url
+# 2026-10-11：本次修改原因：妙手简易描述来自属性，图文详情由正文和实际详情图构成。
+from .content import attribute_description, detail_html
 
 
 class PageMaterial(HTMLParser):
@@ -111,18 +113,109 @@ def specs_for(item: dict) -> dict[str, str]:
     if isinstance(values, list):
         for index, value in enumerate(values, 1):
             if isinstance(value, dict):
-                name = scalar(first(value, "parentSpecName", "parent_spec_name", "name", default=f"规格{index}"))
-                text = scalar(first(value, "specName", "spec_name", "value"))
+                # name = scalar(first(value, "parentSpecName", "parent_spec_name", "name", default=f"规格{index}"))
+                # text = scalar(first(value, "specName", "spec_name", "value"))
+                # 2026-10-11：本次修改原因：真实 Temu 规格使用 specKey/specValue，兼容原有结构。
+                name = scalar(first(value, "specKey", "parentSpecName", "parent_spec_name", "name", default=f"规格{index}"))
+                text = scalar(first(value, "specValue", "specName", "spec_name", "value"))
                 if text:
                     result[name or f"规格{index}"] = text
     return result
 
 
 def source_price(item: dict) -> str:
+    # 2026-10-11：本次修改原因：优先读取当前售价的明确展示文本，不把分值或划线原价误当现价。
+    rich = item.get("salePriceTextRich")
+    if isinstance(rich, dict) and scalar(rich.get("ariaLabel")):
+        return scalar(rich["ariaLabel"])
+    rich_list = item.get("salePriceRich")
+    if isinstance(rich_list, list):
+        text = "".join(scalar(part.get("text")) for part in rich_list if isinstance(part, dict))
+        if text:
+            return text
+    text = scalar(first(item, "salePriceStr", "priceStr", "priceDisplay", "formattedPrice"))
+    if text:
+        return text
+    if "salePrice" not in item and scalar(item.get("normalPriceStr")):
+        return scalar(item["normalPriceStr"])
     value = first(item, "priceStr", "priceDisplay", "formattedPrice", "salePrice", "price", "normalPrice")
     if isinstance(value, dict):
         return scalar(first(value, "priceStr", "formatted", "amount", "value"))
     return scalar(value)
+
+
+# 2026-10-11：本次修改原因：SKU 售价展示元数据也可能明确提供币种，避免只依赖商品字段。
+def source_currency(item: dict, fallback: str = "") -> str:
+    direct = scalar(first(item, "currency", "currencyCode")).upper()
+    if direct:
+        return direct
+    rich = item.get("salePriceTextRich", {})
+    track = rich.get("track", {}) if isinstance(rich, dict) else {}
+    impression = track.get("impr", {}) if isinstance(track, dict) else {}
+    explicit = scalar(impression.get("curr")) if isinstance(impression, dict) else ""
+    return explicit.upper() or fallback
+
+
+# 2026-10-11：本次修改原因：在同一商品所属对象中取兄弟字段，避免跨商品抓取推荐 SKU 或类目。
+def goods_context(docs: list[Any], goods: dict) -> dict:
+    pending = [(document, 0) for document in docs]
+    inspected = 0
+    while pending and inspected < 100_000:
+        value, depth = pending.pop()
+        inspected += 1
+        if depth > 30:
+            continue
+        if isinstance(value, dict):
+            if value.get("goods") is goods:
+                return value
+            pending.extend((child, depth + 1) for child in reversed(list(value.values())) if isinstance(child, (dict, list)))
+        elif isinstance(value, list):
+            pending.extend((child, depth + 1) for child in reversed(value) if isinstance(child, (dict, list)))
+    return {}
+
+
+def attributes_for(values: Any) -> dict[str, str]:
+    result = {}
+    if not isinstance(values, list):
+        return result
+    for item in values:
+        if not isinstance(item, dict):
+            continue
+        name = scalar(first(item, "key", "name", "propertyName"))
+        parts = first(item, "values", "value", "propertyValue", default=[])
+        parts = parts if isinstance(parts, list) else [parts]
+        text = " / ".join(dict.fromkeys(scalar(part) for part in parts if scalar(part)))
+        if name and text:
+            result[name] = text
+    return result
+
+
+def detail_urls(goods: dict, context: dict) -> list[str]:
+    values = image_urls(first(goods, "detailGallery", "detailImages", default=[]))
+    values.extend(image_urls(context.get("productDetailFlatList", [])))
+    detail = context.get("productDetail", {})
+    floors = detail.get("floorList", []) if isinstance(detail, dict) else []
+    if isinstance(floors, list):
+        for floor in floors:
+            if isinstance(floor, dict):
+                values.extend(image_urls(floor.get("items", [])))
+    return list(dict.fromkeys(values))
+
+
+def video_url(goods: dict) -> str:
+    url = scalar(first(goods, "videoUrl", "video_url"))
+    if valid_url(url):
+        return url
+    gallery = first(goods, "gallery", "goodsGallery", default=[])
+    if isinstance(gallery, list):
+        for item in gallery:
+            if not isinstance(item, dict):
+                continue
+            video = item.get("video", {})
+            url = scalar(item.get("videoUrl")) or (scalar(video.get("videoUrl")) if isinstance(video, dict) else "")
+            if valid_url(url):
+                return url
+    return ""
 
 
 def parse_capture(payload: dict) -> Product:
@@ -152,26 +245,75 @@ def parse_capture(payload: dict) -> Product:
     exact = [goods for goods in goods_list if scalar(first(goods, "goodsId", "goods_id")) == source_id]
     unidentified = [goods for goods in goods_list if not scalar(first(goods, "goodsId", "goods_id"))]
     goods = (exact or unidentified or [{}])[0]
+    # 2026-10-11：本次修改原因：真实采集材料的 SKU、详情和站点币种位于 store.goods 的同级。
+    context = goods_context(docs, goods) if goods else {}
+    local_info = context.get("localInfo", {})
+    context_currency = scalar(local_info.get("currency")).upper() if isinstance(local_info, dict) else ""
     if goods_list and not exact and not unidentified:
         product.warnings.append("页面商品 ID 与采集 itemId 不匹配，未采用可能属于推荐商品的数据。")
     product.title = scalar(first(goods, "goodsName", "goods_name")) or meta.get("og:title", "")
     product.description = scalar(first(goods, "description", "goodsDesc")) or meta.get("og:description", "")
-    product.currency = scalar(first(goods, "currency", "currencyCode")).upper()
+    # product.currency = scalar(first(goods, "currency", "currencyCode")).upper()
+    product.currency = scalar(first(goods, "currency", "currencyCode")).upper() or context_currency
     product.images = image_urls(first(goods, "gallery", "goodsGallery", "images", default=[]))
     if not product.images:
         product.images = image_urls(meta.get("og:image", ""))
-    product.detail_images = image_urls(first(goods, "detailGallery", "detailImages", default=[]))
+    # product.detail_images = image_urls(first(goods, "detailGallery", "detailImages", default=[]))
+    product.detail_images = detail_urls(goods, context)
+    product.attributes = attributes_for(first(goods, "goodsProperty", default=context.get("goodsProperty", [])))
+    # 2026-10-11：本次修改原因：SEO 摘要继续保留，但不再充当妙手的属性简述和图文详情。
+    product.simple_description = attribute_description(product.attributes)
+    # product.description_html = detail_html(scalar(first(goods, "description", "goodsDesc")), product.detail_images)
+    # 2026-10-11：本次修改原因：网页 SEO 摘要不属于妙手图文详情，详情字段只采用明确详情图。
+    product.description_html = detail_html("", product.detail_images)
+    for field, names in (("certificate", ("certificateUrl",)), ("instruction_manual", ("instructionManualUrl",)),
+                         ("size_chart", ("sizeChartUrl",)), ("body_size_chart", ("bodySizeChartUrl",))):
+        urls = image_urls(first(goods, *names))
+        setattr(product, field, urls[0] if urls else "")
+    # 2026-10-11：本次修改原因：保存明确提供的像素尺寸，仅用于图片核对，不转为包裹尺寸。
+    galleries = first(goods, "gallery", "goodsGallery", default=[])
+    details = context.get("productDetailFlatList", [])
+    for items in (galleries, details):
+        for item in items if isinstance(items, list) else []:
+            if not isinstance(item, dict):
+                continue
+            urls = image_urls(item)
+            width, height = scalar(item.get("width")), scalar(item.get("height"))
+            if urls and width.isdecimal() and height.isdecimal() and int(width) > 0 and int(height) > 0:
+                product.image_sizes[urls[0]] = f"{width} × {height}"
+    product.video = video_url(goods)
     product.category = scalar(first(goods, "categoryName", "catName"))
+    crumbs = context.get("crumbOptList", [])
+    if not product.category and isinstance(crumbs, list):
+        product.category = " / ".join(dict.fromkeys(
+            scalar(first(item, "optName", "title")) for item in crumbs
+            if isinstance(item, dict) and item.get("optType") in (1, 2, 3)
+            and scalar(first(item, "optName", "title"))
+        ))
     raw_skus = first(goods, "skuList", "sku_list", "skus", default=[])
+    if not raw_skus and exact:
+        raw_skus = context.get("sku", [])
     if isinstance(raw_skus, list):
         for item in raw_skus:
             if not isinstance(item, dict):
                 continue
+            item_goods_id = scalar(first(item, "goodsId", "goods_id"))
+            if item_goods_id and item_goods_id != source_id:
+                continue
             specs = specs_for(item)
             images = image_urls(first(item, "thumbUrl", "imageUrl", "image", "thumb_url"))
             product.skus.append(SKU(
-                platform_sku=scalar(first(item, "skuId", "sku_id", "id")), specs=specs,
-                source_price=source_price(item), currency=scalar(first(item, "currency", "currencyCode")).upper(),
+                # platform_sku=scalar(first(item, "skuId", "sku_id", "id")), specs=specs,
+                # 2026-10-11：本次修改原因：来源 skuId 与妙手的商家平台 SKU 是不同字段。
+                source_sku_id=scalar(first(item, "skuId", "sku_id", "id")), specs=specs,
+                # source_price=source_price(item), currency=scalar(first(item, "currency", "currencyCode")).upper(),
+                # 2026-10-11：本次修改原因：来源价格、库存和限购单独留存；不自动填写自有库存、物流与售价。
+                source_price=source_price(item),
+                # currency=scalar(first(item, "currency", "currencyCode")).upper() or product.currency,
+                # source_currency=scalar(first(item, "currency", "currencyCode")).upper() or product.currency,
+                currency=source_currency(item, product.currency), source_currency=source_currency(item, product.currency),
+                source_stock=scalar(item.get("stockQuantity")), purchase_limit=scalar(item.get("limitQuantity")),
+                availability=scalar(item.get("isOnsale")),
                 image=images[0] if images else "",
             ))
     names = list(dict.fromkeys(name for sku in product.skus for name in sku.specs))

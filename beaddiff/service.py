@@ -76,18 +76,35 @@ class CaptureService:
                 return {"captureId": capture_id, "state": record["state"], "duplicate": True}
             return self._parse(capture_id, envelope)
 
-    def _parse(self, capture_id: str, envelope: dict) -> dict:
+    # def _parse(self, capture_id: str, envelope: dict) -> dict:
+    # 2026-10-11：本次修改原因：区分普通重复采集与用户主动重新解析的字段回填。
+    def _parse(self, capture_id: str, envelope: dict, backfill: bool = False) -> dict:
         try:
             product = parse_capture(envelope["payload"])
             product.capture_id = capture_id
-            product, created = self.repository.store_parsed(product)
+            # product, created = self.repository.store_parsed(product)
+            # 2026-10-11：本次修改原因：重新解析时保留完整解析结果，补齐商品库缺失字段。
+            parsed = product
+            product, created = self.repository.store_parsed(parsed)
+            updated, summary = False, {}
+            if backfill and not created:
+                product, updated, summary = self.repository.backfill_parsed(capture_id, parsed)
             state = "已解析" if product.title and product.skus else "待补充"
             message = "；".join(product.warnings) or "已提取商品信息，请核对后完善售价。"
-            if not created:
+            # if not created:
+            if not created and not backfill:
                 state = "重复商品"
                 message = "原始材料已留档；保留商品库内已有编辑。"
+            # 2026-10-11：本次修改原因：重新解析结果明确显示补齐数量，并告知审核状态变化。
+            if backfill and not created:
+                message = (f"已补齐：SKU {summary.get('skus', 0)} 条、属性 {summary.get('attributes', 0)} 项、"
+                           f"主图 {summary.get('images', 0)} 张、详情图 {summary.get('details', 0)} 张、"
+                           f"其他字段 {summary.get('fields', 0)} 项。人工修改已保留，商品需要重新审核。"
+                           if updated else "没有可补齐的新字段；人工修改、主动清空的字段和已移除的 SKU 均已保留。")
             self.repository.finish_capture(capture_id, state, message, product.id)
-            return {"captureId": capture_id, "state": state, "productId": product.id, "duplicate": False}
+            # return {"captureId": capture_id, "state": state, "productId": product.id, "duplicate": False}
+            return {"captureId": capture_id, "state": state, "productId": product.id, "duplicate": False,
+                    "updated": updated, "summary": summary, "message": message}
         except (ValueError, TypeError, KeyError, RecursionError) as error:
             self.repository.finish_capture(capture_id, "解析失败", str(error)[:1000])
             return {"captureId": capture_id, "state": "解析失败", "message": str(error)}
@@ -98,7 +115,9 @@ class CaptureService:
             if not record:
                 raise ValueError("采集记录不存在。")
             envelope = json.loads(Path(record["raw_path"]).read_text(encoding="utf-8"))
-            return self._parse(capture_id, envelope)
+            # return self._parse(capture_id, envelope)
+            # 2026-10-11：本次修改原因：重新解析触发回填；普通接收继续保护已有商品。
+            return self._parse(capture_id, envelope, backfill=True)
 
     def import_files(self, paths: list[str]) -> dict:
         results, errors = [], []

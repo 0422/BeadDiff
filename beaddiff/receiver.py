@@ -47,6 +47,17 @@ class LocalReceiver:
             def do_GET(self) -> None:
                 if self.path == "/health":
                     self.reply(200, {"service": "BeadDiff", "version": "0.1.0", "ready": True})
+                # 2026-10-11：本次修改原因：让扩展验证本机身份和密钥，无需创建虚构采集记录。
+                elif self.path == "/api/v1/status":
+                    origin = self.headers.get("Origin", "")
+                    if origin and not origin.startswith("chrome-extension://"):
+                        self.reply(403, {"error": "请从扩展后台测试连接"})
+                        return
+                    auth = self.headers.get("Authorization", "")
+                    if not hmac.compare_digest(auth.encode(), ("Bearer " + receiver.settings.token).encode()):
+                        self.reply(401, {"error": "接入密钥不正确"})
+                        return
+                    self.reply(200, {"service": "BeadDiff", "version": "0.1.0", "ready": True})
                 else:
                     self.reply(404, {"error": "接口不存在"})
 

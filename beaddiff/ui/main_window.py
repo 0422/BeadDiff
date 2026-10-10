@@ -282,7 +282,9 @@ class MainWindow(QMainWindow):
         contents.addWidget(self.capture_table, 1)
         self.capture_empty = label("暂无采集记录。插件转发接通后，材料会自动出现在这里。", "empty", True)
         contents.addWidget(self.capture_empty)
-        contents.addWidget(label("重新解析只处理留档材料；已有商品及人工修改会保留。", "hint"))
+        # contents.addWidget(label("重新解析只处理留档材料；已有商品及人工修改会保留。", "hint"))
+        # 2026-10-11：本次修改原因：重新解析可以补齐旧商品缺失字段，明确人工编辑保护和复审要求。
+        contents.addWidget(label("重新解析会补齐留档中的 SKU、属性与图片；保留人工编辑、主动清空及移除的 SKU。更新后需重新审核。", "hint", True))
         layout.addWidget(frame, 1)
         return page
 
@@ -355,10 +357,15 @@ class MainWindow(QMainWindow):
         body_layout.addWidget(connection)
         integration, contents = card()
         contents.addWidget(label("插件接入说明", "sectionTitle"))
-        contents.addWidget(label("当前安装的妙手插件尚未修改。仅启动 BeadDiff 不会自动取得浏览器里的商品。", "warning", True))
-        contents.addWidget(label("1  在插件后台捕获 pfti 上传前的 pageContent、itemId、source、site 和 afterUrl。\n\n"
-                                 "2  使用这里的地址与密钥，从扩展后台另发一份 JSON；妙手原有上传流程保持独立。\n\n"
-                                 "3  接收成功后，商品出现在商品库；未识别字段会保留原始材料并提示补充。", "hint", True))
+        # contents.addWidget(label("当前安装的妙手插件尚未修改。仅启动 BeadDiff 不会自动取得浏览器里的商品。", "warning", True))
+        # contents.addWidget(label("1  在插件后台捕获 pfti 上传前的 pageContent、itemId、source、site 和 afterUrl。\n\n"
+        #                          "2  使用这里的地址与密钥，从扩展后台另发一份 JSON；妙手原有上传流程保持独立。\n\n"
+        #                          "3  接收成功后，商品出现在商品库；未识别字段会保留原始材料并提示补充。", "hint", True))
+        # 2026-10-11：本次修改原因：更新为可操作的开发版插件加载与连接设置指引。
+        contents.addWidget(label("请在浏览器加载项目中的 browser_extension/unpacked 插件目录，再配置同步。", "warning", True))
+        contents.addWidget(label("1  浏览器扩展管理页开启开发者模式，停用旧版，加载项目里的开发版插件。\n\n"
+                                 "2  打开开发版插件的“扩展选项”，粘贴上方地址与密钥，勾选“启用采集同步”并保存、测试连接。\n\n"
+                                 "3  刷新 Temu 商品页并重新采集，商品将在本软件出现；本机关闭时材料会暂存到扩展队列。", "hint", True))
         contents.addWidget(button("查看接入协议", self.show_protocol))
         body_layout.addWidget(integration)
         storage, contents = card()
@@ -479,7 +486,13 @@ class MainWindow(QMainWindow):
         if current_url != previous_url:
             self.preview.set_url(current_url)
         self.inspector_title.setText(product.title or "未识别标题")
-        self.inspector_meta.setText(f"{product.source.upper()} · {product.site or '站点未提供'}\n{product.source_id}\n{len(product.skus)} 个 SKU  ·  v{product.revision}")
+        # self.inspector_meta.setText(f"{product.source.upper()} · {product.site or '站点未提供'}\n{product.source_id}\n{len(product.skus)} 个 SKU  ·  v{product.revision}")
+        # 2026-10-11：本次修改原因：商品速览显示素材数量，便于对比妙手采集结果。
+        self.inspector_meta.setText(
+            f"{product.source.upper()} · {product.site or '站点未提供'}\n{product.source_id}\n"
+            f"{len(product.skus)} 个 SKU  ·  {len(product.attributes)} 项属性  ·  v{product.revision}\n"
+            f"主图 {len(product.images)} 张  ·  详情图 {len(product.detail_images)} 张"
+            + ("  ·  有视频" if product.video else ""))
         self.inspector_status.setText(f"{product.status}  ·  售价币种 {product.currency or '待确认'}")
         issues = product.issues()
         text = "待完善\n" + "\n".join(f"• {issue}" for issue in issues[:14]) if issues else "必填信息已完善，请人工核对来源、售价和规格。"
@@ -658,8 +671,12 @@ class MainWindow(QMainWindow):
     def reparse_selected(self) -> None:
         record = self.selected_capture()
         if record:
+            # self.run_task(lambda: self.service.reparse(record["id"]),
+            #               lambda result: QMessageBox.information(self, "解析结果", f"结果：{result['state']}\n已有商品编辑会保留。"))
+            # 2026-10-11：本次修改原因：将补齐数量或失败原因直接反馈给用户。
             self.run_task(lambda: self.service.reparse(record["id"]),
-                          lambda result: QMessageBox.information(self, "解析结果", f"结果：{result['state']}\n已有商品编辑会保留。"))
+                          lambda result: QMessageBox.information(
+                              self, "解析结果", f"结果：{result['state']}\n\n{result.get('message', '')}"))
 
     def open_export(self, directory: bool = False) -> None:
         row = self.export_table.currentRow()
@@ -678,7 +695,10 @@ class MainWindow(QMainWindow):
         running = self.receiver.server is not None and not self.receiver.error
         self.receiver_badge.setText("● 本机接收运行中" if running else "● 本机接收未启动")
         self.receiver_badge.setToolTip(self.receiver.error or self.settings.endpoint)
-        self.connection_state.setText(f"运行中 · 127.0.0.1:{self.receiver.settings.port} · 插件尚需配置转发" if running else
+        # self.connection_state.setText(f"运行中 · 127.0.0.1:{self.receiver.settings.port} · 插件尚需配置转发" if running else
+        #                               "启动失败：" + (self.receiver.error or "尚未启动") + "。仍可使用文件导入。")
+        # 2026-10-11：本次修改原因：仅展示本机实际状态，不推断浏览器是否已加载或配置插件。
+        self.connection_state.setText(f"运行中 · 127.0.0.1:{self.receiver.settings.port} · 请在扩展选项中测试连接" if running else
                                       "启动失败：" + (self.receiver.error or "尚未启动") + "。仍可使用文件导入。")
 
     def copy_text(self, value: str) -> None:
