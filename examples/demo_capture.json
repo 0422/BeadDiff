@@ -1,0 +1,12 @@
+{
+  "eventId": "beaddiff-structure-demo-20261010",
+  "requestUrl": "https://kuajing-plw.happyporsche.com/open/fetch/pfti",
+  "payload": {
+    "source": "temu",
+    "site": "US",
+    "itemId": "DEMO-001",
+    "afterUrl": "",
+    "pageContent": "<html><head></head><body><script>window.rawData = {\"store\":{\"goods\":{\"goodsId\":\"DEMO-001\",\"goodsName\":\"【虚构样本·请勿发布】串珠结构演示\",\"currency\":\"USD\",\"description\":\"2026-10-10：本次新增原因：提供结构演示；这不是平台真实采集数据。图片、库存、重量和最终售价需由真实商品补充。\",\"skuList\":[{\"skuId\":\"DEMO-BLACK\",\"priceStr\":\"$4.99（演示）\",\"specs\":[{\"parentSpecName\":\"颜色\",\"specName\":\"黑色\"}]},{\"skuId\":\"DEMO-RED\",\"priceStr\":\"$5.99（演示）\",\"specs\":[{\"parentSpecName\":\"颜色\",\"specName\":\"红色\"}]}]}}};</script></body></html>",
+    "productExtInfo": "{\"sizeChatInfo\":null}"
+  }
+}
