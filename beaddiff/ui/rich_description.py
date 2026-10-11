@@ -1,12 +1,16 @@
 # 2026-10-11：本次修改原因：提供妙手式图文详情编辑，静态 HTML 与异步远程图片预览分开处理。
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, QUrl
+# from PySide6.QtCore import Qt, QUrl
+# 2026-10-11：本次修改原因：图文详情支持本地素材加载及对其中单图请求 AI 修改。
+from PySide6.QtCore import Qt, QUrl, Signal
 from PySide6.QtGui import QFont, QImage, QPainter, QTextCharFormat, QTextDocument, QTextListFormat
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 from PySide6.QtWidgets import QDialog, QHBoxLayout, QInputDialog, QPlainTextEdit, QTextEdit, QVBoxLayout, QWidget
 
 from ..content import clean_description
+from ..content import description_images
+from ..assets import local_asset_path, valid_media_url
 from ..models import valid_url
 from .widgets import button, label
 
@@ -31,6 +35,11 @@ class RemoteDescriptionEdit(QTextEdit):
     def loadResource(self, resource_type, url):
         if resource_type == QTextDocument.ResourceType.ImageResource.value:
             address = url.toString()
+            # 2026-10-11：本次修改原因：仅加载受管理的本地图片，拒绝任意本地文件链接。
+            local = local_asset_path(address)
+            if local:
+                image = QImage(str(local))
+                return image.scaledToWidth(640, Qt.TransformationMode.SmoothTransformation) if not image.isNull() else self.placeholder_image
             if not valid_url(address):
                 return self.placeholder_image
             if address in self.cache:
@@ -91,6 +100,8 @@ class RemoteDescriptionEdit(QTextEdit):
 
 
 class RichDescription(QWidget):
+    # 2026-10-11：本次修改原因：详情中的图片复用公共 AI 改图面板。
+    aiRequested = Signal(str)
     def __init__(self, network: QNetworkAccessManager, html: str):
         super().__init__()
         self.original_html = clean_description(html)
@@ -106,6 +117,8 @@ class RichDescription(QWidget):
         toolbar.addWidget(button("插入图片", self.insert_image))
         toolbar.addWidget(button("链接", self.insert_link))
         toolbar.addWidget(button("HTML", self.edit_html))
+        # 2026-10-11：本次修改原因：保持字段旁入口，并允许在图文详情内选择具体图片处理。
+        toolbar.addWidget(button("AI 改详情图", self.request_ai))
         toolbar.addStretch()
         layout.addLayout(toolbar)
         layout.addWidget(self.editor)
@@ -143,7 +156,9 @@ class RichDescription(QWidget):
 
     def insert_image(self) -> None:
         address, accepted = QInputDialog.getText(self, "插入详情图片", "HTTP/HTTPS 图片链接：")
-        if accepted and valid_url(address.strip()):
+        # if accepted and valid_url(address.strip()):
+        # 2026-10-11：本次修改原因：已上传本机素材也可插入图文详情。
+        if accepted and valid_media_url(address.strip()):
             from ..content import detail_html
             self.editor.textCursor().insertHtml(detail_html("", [address.strip()]))
 
@@ -166,3 +181,19 @@ class RichDescription(QWidget):
         layout.addWidget(button("应用", dialog.accept, primary=True))
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self.set_html(editor.toPlainText())
+
+    # 2026-10-11：本次修改原因：优先使用光标所在图片，否则从当前详情图中选择。
+    def request_ai(self) -> None:
+        from PySide6.QtWidgets import QMessageBox
+        cursor = self.editor.textCursor()
+        formatting = cursor.charFormat()
+        current = formatting.toImageFormat().name() if formatting.isImageFormat() else ""
+        images = description_images(self.html())
+        if current and current in images:
+            self.aiRequested.emit(current)
+        elif images:
+            selected, accepted = QInputDialog.getItem(self, "AI 修改详情图片", "选择需要修改的图片：", images, editable=False)
+            if accepted:
+                self.aiRequested.emit(selected)
+        else:
+            QMessageBox.information(self, "没有详情图片", "请先插入图片，再使用 AI 改图。")

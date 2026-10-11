@@ -10,6 +10,9 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from .models import Product
 from .storage import Repository
 
+# 2026-10-11：本次修改原因：本地生成素材可编辑审核，但不能把本机文件地址交给远程 ERP。
+from .content import description_images
+
 
 HEADERS = [
     "*产品主编号", "*产品名称", "货币类型", "产品主图", "货源链接", "货源平台", "货源ID",
@@ -46,6 +49,11 @@ def export_products(repository: Repository, product_ids: list[str], path: Path) 
         if product.main_code in codes:
             raise ValueError(f"产品主编号重复：{product.main_code}，请先修改。")
         codes.add(product.main_code)
+        # 2026-10-11：本次修改原因：导出前准确提示需要转为公开链接的本地素材，不静默输出无效地址。
+        media = product.images + product.detail_images + [sku.image for sku in product.skus]
+        media += description_images(product.description_html)
+        if any(address.startswith("file:") for address in media):
+            raise ValueError(f"“{product.title or product.main_code}”含本地图片。请先上传至可公开访问的图片存储并替换地址，再导出妙手表格。")
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = "模版"

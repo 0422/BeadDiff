@@ -11,3 +11,7 @@ build/
 # 2026-10-11：本次修改原因：开发版插件副本含第三方原程序，仅版本管理自写的分支文件。
 browser_extension/unpacked*/
 
+# 2026-10-11：本次修改原因：模型 URL/Key/名称及原子保存临时文件属于本机配置，不纳入 Git。
+*.local.json
+*.local.json.*
+

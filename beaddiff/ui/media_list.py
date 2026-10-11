@@ -2,23 +2,35 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import QDialog, QHBoxLayout, QHeaderView, QPlainTextEdit, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget
+# from PySide6.QtWidgets import QDialog, QHBoxLayout, QHeaderView, QPlainTextEdit, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget
+# 2026-10-11：本次修改原因：允许从本机上传图片并请求 AI 处理当前图片。
+from pathlib import Path
+from PySide6.QtWidgets import QDialog, QFileDialog, QHBoxLayout, QHeaderView, QMessageBox, QPlainTextEdit, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget
+
+from ..assets import AssetStore
 
 from .widgets import button
 
 
 class MediaList(QWidget):
     textChanged = Signal()
+    # 2026-10-11：本次修改原因：图片操作与模型调用解耦，由商品编辑器接收当前图片。
+    aiRequested = Signal(str)
 
-    def __init__(self, urls: list[str], sizes: dict[str, str]):
+    # def __init__(self, urls: list[str], sizes: dict[str, str]):
+    # 2026-10-11：本次修改原因：同一图片列表支持商品素材和爆款参考素材上传。
+    def __init__(self, urls: list[str], sizes: dict[str, str], assets: AssetStore | None = None, enable_ai: bool = False):
         super().__init__()
         # self.sizes = sizes
         # 2026-10-11：本次修改原因：预览取得的尺寸仅更新编辑副本，取消编辑不改原商品。
         self.sizes = dict(sizes)
+        self.assets = assets
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         self.table = QTableWidget(0, 2)
-        self.table.setHorizontalHeaderLabels(["图片链接（按行排序）", "像素尺寸"])
+        # self.table.setHorizontalHeaderLabels(["图片链接（按行排序）", "像素尺寸"])
+        # 2026-10-11：本次修改原因：列表同时存放链接和本地素材地址。
+        self.table.setHorizontalHeaderLabels(["图片地址（按行排序）", "像素尺寸"])
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self.table.setColumnWidth(1, 130)
         self.table.setMinimumHeight(155)
@@ -27,6 +39,11 @@ class MediaList(QWidget):
         layout.addWidget(self.table)
         actions = QHBoxLayout()
         actions.addWidget(button("新增 / 批量粘贴", self.add_urls))
+        # 2026-10-11：本次修改原因：白底图和参考图直接上传，不需要先取得网络链接。
+        if assets:
+            actions.addWidget(button("上传图片", self.upload))
+        if enable_ai:
+            actions.addWidget(button("AI 改选中图", self.request_ai))
         actions.addWidget(button("移除选中", self.remove_selected))
         actions.addWidget(button("上移", lambda: self.move(-1)))
         actions.addWidget(button("下移", lambda: self.move(1)))
@@ -98,3 +115,31 @@ class MediaList(QWidget):
         self.set_urls(urls)
         self.table.selectRow(target)
         self.textChanged.emit()
+
+    # 2026-10-11：本次修改原因：上传图片先复制到管理目录，原始文件移动后商品仍能使用。
+    def upload(self) -> None:
+        if not self.assets:
+            return
+        paths, _ = QFileDialog.getOpenFileNames(self, "上传商品 / 参考图片", "", "图片 (*.png *.jpg *.jpeg *.webp *.gif)")
+        imported = []
+        errors = []
+        for value in paths:
+            try:
+                asset = self.assets.import_file(Path(value))
+                imported.append(asset.uri)
+                self.sizes[asset.uri] = f"{asset.width} × {asset.height}"
+            except (ValueError, OSError) as error:
+                errors.append(f"{Path(value).name}：{error}")
+        if imported:
+            self.set_urls(self.toPlainText().splitlines() + imported)
+            self.textChanged.emit()
+        if errors:
+            QMessageBox.warning(self, "部分图片未能上传", "\n".join(errors))
+
+    def request_ai(self) -> None:
+        row = self.table.currentRow()
+        item = self.table.item(row, 0) if row >= 0 else None
+        if item and item.text().strip():
+            self.aiRequested.emit(item.text().strip())
+        else:
+            QMessageBox.information(self, "请选择图片", "先选中需要修改的图片，再点击 AI。")

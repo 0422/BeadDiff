@@ -48,6 +48,22 @@ class Repository:
                     versions TEXT NOT NULL
                 );
             """)
+            # 2026-10-11：本次修改原因：回传记录保存操作方式和确切内容快照；数据库升级不改原商品或原始材料。
+            connection.executescript("""
+                CREATE TABLE IF NOT EXISTS erp_transfers (
+                    id TEXT PRIMARY KEY, product_id TEXT NOT NULL, revision INTEGER NOT NULL,
+                    mode TEXT NOT NULL, content_hash TEXT NOT NULL, snapshot TEXT NOT NULL,
+                    state TEXT NOT NULL, target_id TEXT NOT NULL DEFAULT '',
+                    receipt TEXT NOT NULL DEFAULT '{}', message TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS erp_transfers_product ON erp_transfers(product_id, created_at);
+            """)
+            # 2026-10-11：本次修改原因：进程中断时不能把正在发送当成失败后自动重试，以免新增重复商品。
+            connection.execute(
+                "UPDATE erp_transfers SET state='unknown',message=? WHERE state='sending'",
+                ("上次发送被中断，结果未知。请先在妙手核对，避免重复新增。",),
+            )
 
     @contextmanager
     def connection(self) -> Iterator[sqlite3.Connection]:
@@ -131,6 +147,25 @@ class Repository:
                                (product.id, product.revision, body, product.updated_at))
         return product, True
 
+    # 2026-10-11：本次修改原因：自拍白底图建立独立商品草稿，不伪造插件采集载荷或采集记录。
+    def create_product(self, product: Product) -> Product:
+        if product.source != "upload" or not product.images:
+            raise ValueError("白底图建档需要至少一张已上传的商品图片。")
+        product.id = uuid.uuid4().hex
+        product.source_id = uuid.uuid4().hex
+        product.main_code = product.main_code or f"BD-LOCAL-{product.source_id[:10].upper()}"
+        product.created_at = product.updated_at = now_iso()
+        product.revision = 1
+        product.approved = False
+        product.edit_tracking = True
+        body = json.dumps(product.to_dict(), ensure_ascii=False)
+        with self.connection() as connection:
+            connection.execute("INSERT INTO products VALUES (?,?,?,?,?,?)",
+                               (product.id, product.source, product.source_id, product.site, body, product.updated_at))
+            connection.execute("INSERT INTO product_versions VALUES (?,?,?,?)",
+                               (product.id, product.revision, body, product.updated_at))
+        return product
+
     # 2026-10-11：本次修改原因：重新解析真实采集材料时只补齐缺失来源字段，不覆盖人工编辑。
     @staticmethod
     def _mark_manual_changes(existing: Product, product: Product) -> None:
@@ -147,6 +182,9 @@ class Repository:
         for name in simple_fields:
             if getattr(existing, name) != getattr(product, name):
                 tracked.add(name)
+        # 2026-10-11：本次修改原因：单规格货源价也支持保存、清空及增量回传。
+        if existing.supply_price != product.supply_price:
+            tracked.add("supply_price")
         for name in set(existing.attributes) | set(product.attributes):
             if existing.attributes.get(name) != product.attributes.get(name):
                 tracked.add(f"attribute:{name}")
@@ -334,6 +372,18 @@ class Repository:
             # 2026-10-11：本次修改原因：保存人工编辑痕迹，重新解析时保护主动修改和删除。
             self._load_manual_history(connection, existing)
             self._mark_manual_changes(existing, product)
+            # 2026-10-11：本次修改原因：手动和 AI 应用后保存共用内容比较；预览尺寸、审核、空保存不算商品修改。
+            changed = existing.content_hash != product.content_hash
+            product.content_modified = existing.content_modified or changed
+            product.modified_at = now_iso() if changed else existing.modified_at
+            # 2026-10-11：本次修改原因：编辑器可能早于回执打开，保存时保留数据库中的最新回传信息。
+            # for name in ("erp_content_hash", "erp_transferred_at", "erp_transfer_mode", "erp_target_id",
+            #              "erp_transfer_id", "erp_original_id"):
+            # 2026-10-11：本次修改原因：旧编辑窗口不能覆盖最新账号关联、SKU 对应关系或增量基线。
+            for name in ("erp_content_hash", "erp_transferred_at", "erp_transfer_mode", "erp_target_id",
+                         "erp_transfer_id", "erp_original_id", "erp_original_account", "erp_sku_links",
+                         "erp_update_baseline", "erp_account_id"):
+                setattr(product, name, getattr(existing, name))
             product.approved = approve
             product.revision += 1
             product.updated_at = now_iso()
@@ -343,6 +393,127 @@ class Repository:
             connection.execute("INSERT INTO product_versions VALUES (?,?,?,?)",
                                (product.id, product.revision, body, product.updated_at))
         return product
+
+    # 2026-10-11：本次修改原因：在同一事务中冻结回传内容及配置方式，防止发送途中编辑影响该次回执。
+    def create_erp_transfer(self, product_id: str, mode: str, state: str, message: str = "") -> dict:
+        if mode not in {"create", "update"} or state not in {"blocked", "sending"}:
+            raise ValueError("回传方式或初始状态无效。")
+        with self.connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute("SELECT body FROM products WHERE id=?", (product_id,)).fetchone()
+            if row is None:
+                raise ValueError("商品不存在，请刷新列表。")
+            product = Product.from_dict(json.loads(row["body"]))
+            unresolved = connection.execute(
+                "SELECT id FROM erp_transfers WHERE product_id=? AND state IN ('sending','unknown') LIMIT 1",
+                (product_id,),
+            ).fetchone()
+            if unresolved:
+                raise ValueError("该商品已有正在发送或结果未知的记录，请先核对回传结果。")
+            transfer_id, timestamp = uuid.uuid4().hex, now_iso()
+            snapshot = json.dumps(product.to_dict(), ensure_ascii=False)
+            connection.execute("INSERT INTO erp_transfers VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", (
+                transfer_id, product.id, product.revision, mode, product.content_hash, snapshot,
+                state, "", "{}", message, timestamp, timestamp,
+            ))
+            return dict(connection.execute("SELECT * FROM erp_transfers WHERE id=?", (transfer_id,)).fetchone())
+
+    # 2026-10-11：本次修改原因：只有经过适配器确认的成功回执才能标记已传，绑定发送快照而非当前编辑版本。
+    def finish_erp_transfer(self, transfer_id: str, state: str, message: str,
+                            # target_id: str = "", receipt: dict | None = None) -> None:
+                            # 2026-10-11：本次修改原因：仅允许经过真实只读核对的未知记录转为成功。
+                            target_id: str = "", receipt: dict | None = None, *, resolved_unknown: bool = False) -> None:
+        if state not in {"succeeded", "failed", "unknown"}:
+            raise ValueError("回传结果状态无效。")
+        if state == "succeeded" and (not target_id.strip() or not receipt):
+            raise ValueError("成功回传必须有妙手目标商品 ID 和经过适配器确认的回执。")
+        with self.connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute("SELECT * FROM erp_transfers WHERE id=?", (transfer_id,)).fetchone()
+            # if row is None or row["state"] != "sending":
+            # 2026-10-11：本次修改原因：核对分支须有可信回执；发送分支仍只接受 sending 状态。
+            expected_state = "unknown" if resolved_unknown else "sending"
+            if resolved_unknown and (state != "succeeded" or not (receipt or {}).get("reconciled")):
+                raise ValueError("未知结果只能通过只读核对确认成功。")
+            if row is None or row["state"] != expected_state:
+                raise ValueError("回传记录不存在或已处理，不能重复提交回执。")
+            timestamp = now_iso()
+            connection.execute("UPDATE erp_transfers SET state=?,target_id=?,receipt=?,message=?,updated_at=? WHERE id=?",
+                               (state, target_id, json.dumps(receipt or {}, ensure_ascii=False), message, timestamp, transfer_id))
+            if state == "succeeded":
+                current = connection.execute("SELECT body FROM products WHERE id=?", (row["product_id"],)).fetchone()
+                if current is None:
+                    raise ValueError("商品已不存在，无法保存回传成功信息。")
+                product = Product.from_dict(json.loads(current["body"]))
+                product.erp_content_hash = row["content_hash"]
+                product.erp_transferred_at = timestamp
+                product.erp_transfer_mode = row["mode"]
+                product.erp_target_id = target_id
+                product.erp_transfer_id = transfer_id
+                # 2026-10-11：本次修改原因：成功回执绑定发送账号，设置页切换账号后不误认已经传到新账号。
+                product.erp_account_id = (receipt or {}).get("account_id", "")
+                # 2026-10-11：本次修改原因：新增草稿的 ID 不替换原采集商品 ID，避免切换更新方式后更新错对象。
+                if row["mode"] == "update":
+                    product.erp_original_id = target_id
+                    # 2026-10-11：本次修改原因：仅以成功发送的快照作为下一次增量基线，不把并发的新编辑当作已发送。
+                    # product.erp_update_baseline = json.loads(row["snapshot"])
+                    # 2026-10-11：本次修改原因：剥离旧基线及回执元数据，避免每次成功更新都递归嵌套历史快照。
+                    baseline = json.loads(row["snapshot"])
+                    for name in list(baseline):
+                        if name.startswith("erp_"):
+                            baseline.pop(name)
+                    product.erp_update_baseline = baseline
+                    product.erp_sku_links = (receipt or {}).get("sku_links", product.erp_sku_links)
+                connection.execute("UPDATE products SET body=? WHERE id=?",
+                                   (json.dumps(product.to_dict(), ensure_ascii=False), product.id))
+
+    # 2026-10-11：本次修改原因：关联操作只写本地元数据，经过详情查询与人工确认后才允许更新原商品。
+    def bind_erp_original(self, product_id: str, target_id: str, account_id: str,
+                          sku_links: dict[str, str], expected_revision: int) -> Product:
+        if not target_id.isdecimal() or int(target_id) <= 0 or not account_id:
+            raise ValueError("必须使用经妙手详情接口验证的公共采集箱商品 ID 和账号。")
+        with self.connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute("SELECT body FROM products WHERE id=?", (product_id,)).fetchone()
+            if row is None:
+                raise ValueError("商品不存在。")
+            product = Product.from_dict(json.loads(row["body"]))
+            if product.revision != expected_revision:
+                raise ValueError("商品在查询期间已被编辑，请关闭关联窗口后重新操作。")
+            if connection.execute("SELECT id FROM erp_transfers WHERE product_id=? AND state IN ('sending','unknown')",
+                                  (product_id,)).fetchone():
+                raise ValueError("商品存在未确认的回传结果，请先在妙手核对。")
+            self._load_manual_history(connection, product)
+            if (product.erp_original_id, product.erp_original_account) != (target_id, account_id):
+                product.erp_update_baseline = {}
+                product.erp_content_hash = ""
+                product.erp_account_id = ""
+            product.erp_original_id = target_id
+            product.erp_original_account = account_id
+            product.erp_sku_links = dict(sku_links)
+            # 关联不改变商品业务内容及审核状态，但递增版本以防旧窗口覆盖关联。
+            product.revision += 1
+            product.updated_at = now_iso()
+            body = json.dumps(product.to_dict(), ensure_ascii=False)
+            connection.execute("UPDATE products SET body=?,updated_at=? WHERE id=?", (body, product.updated_at, product.id))
+            connection.execute("INSERT INTO product_versions VALUES (?,?,?,?)", (product.id, product.revision, body, product.updated_at))
+            return product
+
+    # 2026-10-11：本次修改原因：关联 SKU 时参考首次采集规格，不用修改后的规格猜测原 ERP SKU。
+    def erp_origin_product(self, product_id: str) -> Product | None:
+        with self.connection() as connection:
+            row = connection.execute("SELECT body FROM product_versions WHERE product_id=? ORDER BY revision LIMIT 1",
+                                     (product_id,)).fetchone()
+            return Product.from_dict(json.loads(row["body"])) if row else self.product(product_id)
+
+    # 2026-10-11：本次修改原因：设置页和商品速览可查询失败原因、回传方式及确切发送版本。
+    def erp_transfers(self, product_id: str = "") -> list[dict]:
+        with self.connection() as connection:
+            if product_id:
+                rows = connection.execute("SELECT * FROM erp_transfers WHERE product_id=? ORDER BY created_at DESC,rowid DESC", (product_id,))
+            else:
+                rows = connection.execute("SELECT * FROM erp_transfers ORDER BY created_at DESC,rowid DESC")
+            return [dict(row) for row in rows]
 
     def record_export(self, path: Path, products: list[Product]) -> None:
         with self.connection() as connection:

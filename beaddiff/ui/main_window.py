@@ -14,17 +14,35 @@ from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog,
     QFileDialog, QFrame, QGridLayout, QHBoxLayout, QHeaderView, QLineEdit, QMainWindow,
     QMessageBox, QPlainTextEdit, QScrollArea, QSpinBox, QSplitter, QStackedWidget,
-    QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
+    # QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
+    # 2026-10-11：本次修改原因：在设置中提供插件连接与 AI 模型两个页面。
+    QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget,
 )
 
 from ..config import Settings
 from ..exporter import export_products
+# 2026-10-11：本次修改原因：商品库与设置复用回传方式、回执服务及任务状态。
+from ..erp import ERPService, MODE_LABELS, STATE_LABELS
 from ..models import Product, valid_url
 from ..receiver import LocalReceiver
 from ..service import CaptureService
 from ..storage import Repository
 from .editor import ProductEditor
 from .widgets import ImagePreview, Task, button, card, icon, label
+# 2026-10-11：本次修改原因：两条商品路线共用本机模型配置、素材、任务与 AI 服务。
+from ..ai.config import ModelConfigStore
+from ..ai.service import AIService
+from ..assets import AssetStore
+from .ai_runner import TaskHub
+from .model_settings import ModelSettingsPage
+from .product_creation import ProductCreation
+# 2026-10-11：本次修改原因：商品编辑和两条建档路线共用官方公共采集箱适配器与独立凭证配置。
+from ..miaoshou import MiaoshouAdapter
+from ..miaoshou_config import MiaoshouConfigStore
+from .miaoshou_binding import MiaoshouBindingDialog
+from .miaoshou_settings import MiaoshouSettingsPage
+# 2026-10-11：本次修改原因：核对未知回传时允许填写经人工在妙手找到的目标商品 ID。
+from PySide6.QtWidgets import QInputDialog
 
 
 def readable_time(value: str) -> str:
@@ -56,6 +74,17 @@ class MainWindow(QMainWindow):
         self.network = QNetworkAccessManager(self)
         self.pool = QThreadPool(self)
         self.pool.setMaxThreadCount(2)
+        # 2026-10-11：本次修改原因：启动时加载独立模型配置文件，所有编辑入口复用同一服务。
+        self.model_config = ModelConfigStore(settings.data_dir)
+        self.assets = AssetStore(settings.data_dir)
+        self.ai_service = AIService(self.model_config, self.assets)
+        # 2026-10-11：本次修改原因：两条商品路线保存后共用妙手回传适配层。
+        # self.erp_service = ERPService(repository)
+        # 2026-10-11：本次修改原因：加载本地开放平台凭证并注入真实公共采集箱适配器。
+        self.miaoshou_config = MiaoshouConfigStore(settings.data_dir)
+        self.miaoshou_adapter = MiaoshouAdapter(self.miaoshou_config)
+        self.erp_service = ERPService(repository, self.miaoshou_adapter)
+        self.ai_hub = TaskHub(self)
         self._tasks: set[Task] = set()
         self._products: list[Product] = []
         self.checked_ids: set[str] = set()
@@ -109,7 +138,9 @@ class MainWindow(QMainWindow):
         layout.addSpacing(6)
         self.navigation = QButtonGroup(self)
         for index, (text, symbol) in enumerate([
-            ("商品库", "products"), ("采集记录", "capture"), ("导出记录", "export"), ("连接设置", "settings"),
+            # ("商品库", "products"), ("采集记录", "capture"), ("导出记录", "export"), ("连接设置", "settings"),
+            # 2026-10-11：本次修改原因：统一设置入口容纳插件连接与模型管理。
+            ("商品库", "products"), ("采集记录", "capture"), ("导出记录", "export"), ("设置", "settings"),
         ]):
             item = button(text)
             item.setObjectName("navButton")
@@ -130,6 +161,8 @@ class MainWindow(QMainWindow):
         self.navigation.button(index).setChecked(True)
         if index == 3:
             self.update_connection()
+            # 2026-10-11：本次修改原因：编辑窗口修改模型后，设置页展示最新配置。
+            self.model_settings.refresh()
 
     def _heading(self, title: str, subtitle: str) -> tuple[QHBoxLayout, QVBoxLayout]:
         row = QHBoxLayout()
@@ -151,6 +184,8 @@ class MainWindow(QMainWindow):
         heading.addWidget(self.receiver_badge)
         heading.addSpacing(8)
         heading.addWidget(button("刷新", self.refresh))
+        # 2026-10-11：本次修改原因：白底图路线直接建草稿并进入共用商品编辑页。
+        heading.addWidget(button("上传白底图建商品", self.create_from_photos, symbol="import"))
         self.import_button = button("导入采集文件", self.import_files, primary=True, symbol="import")
         heading.addWidget(self.import_button)
         layout.addLayout(heading)
@@ -211,18 +246,38 @@ class MainWindow(QMainWindow):
         selection.addStretch()
         self.approve_button = button("批量审核", self.approve_selected)
         selection.addWidget(self.approve_button)
-        self.export_button = button("导出妙手表格", self.export_selected, primary=True, symbol="export")
+        # self.export_button = button("导出妙手表格", self.export_selected, primary=True, symbol="export")
+        # 2026-10-11：本次修改原因：表格导出与回传分开；批量回传单独放在下一行，避免挤压列表工具栏。
+        self.export_button = button("导出妙手表格", self.export_selected, symbol="export")
         selection.addWidget(self.export_button)
         catalog_layout.addLayout(selection)
-        self.product_table = table(["", "商品 / 主编号", "来源", "SKU", "状态", "更新"])
-        for col, width in enumerate([42, 310, 90, 60, 90, 105]):
+        # 2026-10-11：本次修改原因：批量回传入口显示当前设置方式，并允许查看可追溯的回传记录。
+        erp_actions = QHBoxLayout()
+        erp_actions.setContentsMargins(18, 0, 18, 0)
+        self.erp_mode_hint = label("", "muted")
+        erp_actions.addWidget(self.erp_mode_hint)
+        erp_actions.addStretch()
+        erp_actions.addWidget(button("回传记录", self.show_erp_records))
+        self.erp_button = button("传回妙手 ERP", self.transfer_selected, primary=True, symbol="export")
+        erp_actions.addWidget(self.erp_button)
+        catalog_layout.addLayout(erp_actions)
+        # self.product_table = table(["", "商品 / 主编号", "来源", "SKU", "状态", "更新"])
+        # for col, width in enumerate([42, 310, 90, 60, 90, 105]):
+        #     self.product_table.setColumnWidth(col, width)
+        # 2026-10-11：本次修改原因：增加内容修改及当前内容是否已传回 ERP 两个独立状态列。
+        self.product_table = table(["", "商品 / 主编号", "来源", "SKU", "状态", "修改", "传回 ERP", "更新"])
+        for col, width in enumerate([42, 270, 70, 50, 78, 72, 90, 100]):
             self.product_table.setColumnWidth(col, width)
+        self.product_table.horizontalHeader().setStretchLastSection(False)
+        self.product_table.horizontalHeader().setMinimumSectionSize(42)
         self.product_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self.product_table.itemChanged.connect(self.check_changed)
         self.product_table.itemSelectionChanged.connect(self.product_selected)
         self.product_table.itemDoubleClicked.connect(lambda _item: self.edit_current())
         catalog_layout.addWidget(self.product_table, 1)
-        self.product_empty = label("还没有商品\n导入 pfti 请求 JSON / HAR，或在连接设置中配置插件转发。", "empty", True)
+        # self.product_empty = label("还没有商品\n导入 pfti 请求 JSON / HAR，或在连接设置中配置插件转发。", "empty", True)
+        # 2026-10-11：本次修改原因：为空商品库提供采集与上传两条可操作路线。
+        self.product_empty = label("还没有商品\n导入采集文件、配置插件同步，或上传白底图创建商品。", "empty", True)
         self.product_empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
         catalog_layout.addWidget(self.product_empty)
         self.product_summary = label("共 0 个商品", "muted")
@@ -256,6 +311,17 @@ class MainWindow(QMainWindow):
         self.edit_button = button("编辑商品与 SKU", self.edit_current, primary=True)
         self.source_button = button("打开货源页面", self.open_source)
         contents.addWidget(self.edit_button)
+        # 2026-10-11：本次修改原因：速览提供当前单商品回传入口，与勾选批量操作共用业务逻辑。
+        self.erp_current_button = button("传回妙手 ERP", self.transfer_current, symbol="export")
+        contents.addWidget(self.erp_current_button)
+        # 2026-10-11：本次修改原因：更新前先查询并人工确认原商品，避免误用平台商品 ID。
+        self.erp_binding_hint = label("", "hint", True)
+        contents.addWidget(self.erp_binding_hint)
+        self.erp_bind_button = button("关联妙手原商品", self.bind_erp_current)
+        contents.addWidget(self.erp_bind_button)
+        # 2026-10-11：本次修改原因：超时后查询实际详情，不能直接重发新增或手动勾选已传。
+        self.erp_reconcile_button = button("核对未知回传（只读）", self.reconcile_erp_current)
+        contents.addWidget(self.erp_reconcile_button)
         contents.addWidget(self.source_button)
         return frame
 
@@ -316,6 +382,60 @@ class MainWindow(QMainWindow):
         return page
 
     def _settings_page(self) -> QWidget:
+        # 2026-10-11：本次修改原因：模型配置放入独立可点击设置页面，保留插件连接功能。
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        # heading, _ = self._heading("设置", "管理插件连接与当前使用的 AI 模型")
+        # 2026-10-11：本次修改原因：设置页增加独立的妙手回传栏目，避免开关隐藏在插件接收设置内。
+        heading, _ = self._heading("设置", "管理插件连接、AI 模型与妙手回传方式")
+        layout.addLayout(heading)
+        tabs = QTabWidget()
+        tabs.addTab(self._connection_settings_page(), "插件连接")
+        self.model_settings = ModelSettingsPage(self.model_config, self.assets, self.ai_hub, self)
+        tabs.addTab(self.model_settings, "AI 模型")
+        tabs.addTab(self._erp_settings_page(), "妙手回传")
+        layout.addWidget(tabs, 1)
+        return page
+
+    # 2026-10-11：本次修改原因：配置新增或更新开关，默认新增，并明确真实接口接通状态。
+    def _erp_settings_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(18, 18, 18, 18)
+        frame, contents = card()
+        contents.addWidget(label("回传目标", "sectionTitle"))
+        contents.addWidget(label("设置决定下一次回传的处理方式；已创建的回传记录保留各自的方式。", "hint", True))
+        self.erp_mode = QComboBox()
+        self.erp_mode.addItem("新增一份加工后的商品（保留原采集商品）", "create")
+        # self.erp_mode.addItem("更新妙手采集箱中的原商品", "update")
+        # 2026-10-11：本次修改原因：当前实现明确写入公共采集箱，不等同于直接保存 Temu 平台采集箱。
+        self.erp_mode.addItem("更新妙手公共采集箱中的原商品", "update")
+        self.erp_mode.setCurrentIndex(self.erp_mode.findData(self.settings.erp_transfer_mode))
+        contents.addWidget(self.erp_mode)
+        contents.addWidget(label("更新原商品需要可靠关联妙手商品 ID。来源平台商品 ID 不能直接代替；上传白底图创建的商品首次回传请选择新增。", "hint", True))
+        actions = QHBoxLayout()
+        actions.addStretch()
+        actions.addWidget(button("保存回传方式", self.save_erp_mode, primary=True))
+        contents.addLayout(actions)
+        layout.addWidget(frame)
+        # frame, contents = card()
+        # contents.addWidget(label("回传连接", "sectionTitle"))
+        # contents.addWidget(label(self.erp_service.unavailable_reason or "已接通经过验证的妙手回传适配器。", "warning", True))
+        # contents.addWidget(label("只有妙手确认保存成功才显示“已传”。导出表格、原采集提交及 AI 生成完成不会改变回传状态；发布仍在妙手完成。", "hint", True))
+        # contents.addWidget(button("查看回传记录", self.show_erp_records))
+        # layout.addWidget(frame)
+        # layout.addStretch()
+        # 2026-10-11：本次修改原因：用可编辑的凭证设置及只读测试替代静态“未接通”提示。
+        self.miaoshou_settings = MiaoshouSettingsPage(self.miaoshou_config, self.miaoshou_adapter,
+                                                     self.run_task, self.refresh, self)
+        layout.addWidget(self.miaoshou_settings, 1)
+        layout.addWidget(button("查看回传记录", self.show_erp_records))
+        return page
+
+    # def _settings_page(self) -> QWidget:
+    # 2026-10-11：本次修改原因：将原连接页作为设置子页面使用。
+    def _connection_settings_page(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -446,20 +566,41 @@ class MainWindow(QMainWindow):
             check.setCheckState(Qt.CheckState.Checked if product.id in self.checked_ids else Qt.CheckState.Unchecked)
             check.setData(Qt.ItemDataRole.UserRole, product.id)
             self.product_table.setItem(row, 0, check)
+            # values = [f"{product.title or '未识别标题 · 请完善'}\n{product.main_code}", product.source.upper(),
+            #           str(len(product.skus)), product.status, readable_time(product.updated_at)]
+            # 2026-10-11：本次修改原因：列表显示保存的内容修改与可信回执对应状态。
             values = [f"{product.title or '未识别标题 · 请完善'}\n{product.main_code}", product.source.upper(),
-                      str(len(product.skus)), product.status, readable_time(product.updated_at)]
+                      # str(len(product.skus)), product.status, product.modification_status, product.erp_status,
+                      # 2026-10-11：本次修改原因：账号变化后不能把旧账号的成功回执显示为当前账号已传。
+                      str(len(product.skus)), product.status, product.modification_status, self.erp_display_status(product),
+                      readable_time(product.updated_at)]
             for col, value in enumerate(values, 1):
                 item = QTableWidgetItem(value)
                 item.setToolTip(value)
                 if col == 4:
                     item.setForeground(QColor({"待完善": "#b87a2c", "待审核": "#4282ad", "已审核": "#168371"}[product.status]))
+                # 2026-10-11：本次修改原因：通过颜色和说明区分修改状态以及内容是否已回传。
+                if col == 5:
+                    item.setForeground(QColor("#4282ad" if product.content_modified else "#70888d"))
+                    item.setToolTip("商品内容已修改并保存" if product.content_modified else "尚无已保存的内容修改")
+                if col == 6:
+                    item.setForeground(QColor("#168371" if value == "已传" else "#70888d"))
+                    hint = "当前内容尚未取得妙手成功回执。"
+                    if product.erp_transferred_at:
+                        hint = f"最近成功回传：{readable_time(product.erp_transferred_at)}\n方式：{MODE_LABELS.get(product.erp_transfer_mode, product.erp_transfer_mode)}\n妙手目标 ID：{product.erp_target_id}"
+                        if value == "未传":
+                            hint += "\n当前内容与上次已传内容不同，需重新回传。"
+                    item.setToolTip(hint)
                 self.product_table.setItem(row, col, item)
             if product.id == previous:
                 selected_row = row
         self.product_table.blockSignals(False)
         self.product_empty.setVisible(not filtered)
+        # self.product_empty.setText("没有符合筛选条件的商品。" if self._products else
+        #                            "还没有商品\n导入 pfti 请求 JSON / HAR，或在连接设置中配置插件转发。")
+        # 2026-10-11：本次修改原因：刷新后仍展示采集与白底图两条路线。
         self.product_empty.setText("没有符合筛选条件的商品。" if self._products else
-                                   "还没有商品\n导入 pfti 请求 JSON / HAR，或在连接设置中配置插件转发。")
+                                   "还没有商品\n导入采集文件、配置插件同步，或上传白底图创建商品。")
         self.product_summary.setText(f"当前 {len(filtered)} 个商品  /  商品库共 {len(self._products)} 个    ·    双击编辑")
         if filtered:
             self.product_table.selectRow(selected_row)
@@ -474,6 +615,16 @@ class MainWindow(QMainWindow):
         previous_url = self.current_product.images[0] if self.current_product and self.current_product.images else ""
         self.current_product = product
         self.edit_button.setEnabled(product is not None)
+        self.erp_current_button.setEnabled(product is not None and not self._tasks)
+        # 2026-10-11：本次修改原因：查询、发送期间锁住关联和凭证编辑，保持同一账号的任务快照。
+        self.erp_bind_button.setEnabled(product is not None and not self._tasks)
+        # 2026-10-11：本次修改原因：只读核对复用后台任务状态。
+        self.erp_reconcile_button.setEnabled(product is not None and not self._tasks)
+        self.miaoshou_settings.set_busy(bool(self._tasks))
+        self.erp_mode.setEnabled(not self._tasks)
+        self.erp_binding_hint.setText(
+            (f"公共采集箱原商品 ID：{product.erp_original_id}" if product.erp_original_id else "更新前请先关联妙手原商品")
+            if product else "")
         self.source_button.setEnabled(bool(product and valid_url(product.source_url)))
         if not product:
             self.inspector_title.setText("选择商品查看详情")
@@ -493,7 +644,12 @@ class MainWindow(QMainWindow):
             f"{len(product.skus)} 个 SKU  ·  {len(product.attributes)} 项属性  ·  v{product.revision}\n"
             f"主图 {len(product.images)} 张  ·  详情图 {len(product.detail_images)} 张"
             + ("  ·  有视频" if product.video else ""))
-        self.inspector_status.setText(f"{product.status}  ·  售价币种 {product.currency or '待确认'}")
+        # self.inspector_status.setText(f"{product.status}  ·  售价币种 {product.currency or '待确认'}")
+        # 2026-10-11：本次修改原因：速览与商品列表展示相同的修改和回传状态。
+        self.inspector_status.setText(f"{product.status}  ·  售价币种 {product.currency or '待确认'}\n"
+                                      # f"{product.modification_status}  ·  传回 ERP：{product.erp_status}")
+                                      # 2026-10-11：本次修改原因：速览与列表一致按当前账号展示回传状态。
+                                      f"{product.modification_status}  ·  传回 ERP：{self.erp_display_status(product)}")
         issues = product.issues()
         text = "待完善\n" + "\n".join(f"• {issue}" for issue in issues[:14]) if issues else "必填信息已完善，请人工核对来源、售价和规格。"
         if product.warnings:
@@ -512,6 +668,9 @@ class MainWindow(QMainWindow):
 
     def update_selection(self) -> None:
         self.selected_label.setText(f"已选 {len(self.checked_ids)} 项")
+        # 2026-10-11：本次修改原因：回传期间禁止重复点击，当前配置方式直接展示在商品操作区。
+        self.erp_button.setEnabled(bool(self.checked_ids) and not self._tasks)
+        self.erp_mode_hint.setText("回传方式：" + MODE_LABELS[self.settings.erp_transfer_mode])
         self.approve_button.setEnabled(bool(self.checked_ids))
         self.export_button.setEnabled(bool(self.checked_ids))
         checked = self.product_table.rowCount() > 0 and all(
@@ -531,9 +690,33 @@ class MainWindow(QMainWindow):
     def edit_current(self) -> None:
         if self.current_product:
             product = self.repository.product(self.current_product.id)
-            if product and ProductEditor(self.repository, product, self.network, self).exec() == QDialog.DialogCode.Accepted:
+            # if product and ProductEditor(self.repository, product, self.network, self).exec() == QDialog.DialogCode.Accepted:
+            # 2026-10-11：本次修改原因：采集商品编辑调用共用 AI 服务，表单应用后再由用户保存。
+            if product and ProductEditor(self.repository, product, self.network, self,
+                                         ai_service=self.ai_service, ai_hub=self.ai_hub).exec() == QDialog.DialogCode.Accepted:
                 self.refresh()
                 self.statusBar().showMessage("商品已保存，编辑版本已记录", 6000)
+
+    # 2026-10-11：本次修改原因：上传商品与采集商品共用编辑、版本和 AI 处理流程。
+    def create_from_photos(self) -> None:
+        creation = ProductCreation(self.repository, self.assets, self)
+        if creation.exec() != QDialog.DialogCode.Accepted or not creation.created_product:
+            return
+        # self.current_product = creation.created_product
+        self.active_filter = "全部"
+        self.filters.button(0).setChecked(True)
+        self.source_filter.setCurrentText("全部来源")
+        self.search.clear()
+        # 2026-10-11：本次修改原因：筛选刷新可能切换选中项，最后重新定位新草稿并更新速览图。
+        self.current_product = creation.created_product
+        self.preview.set_url(creation.created_product.images[0])
+        self.refresh()
+        product = creation.created_product
+        editor = ProductEditor(self.repository, product, self.network, self,
+                               ai_service=self.ai_service, ai_hub=self.ai_hub)
+        editor.exec()
+        self.refresh()
+        self.statusBar().showMessage("上传商品草稿已保存在商品库", 6000)
 
     def open_source(self) -> None:
         if self.current_product and valid_url(self.current_product.source_url):
@@ -544,6 +727,15 @@ class MainWindow(QMainWindow):
         task.callback = callback
         self._tasks.add(task)
         self.import_button.setEnabled(False)
+        # 2026-10-11：本次修改原因：后台任务运行时禁用回传按钮，避免重复发起同一批商品。
+        self.erp_button.setEnabled(False)
+        self.erp_current_button.setEnabled(False)
+        # 2026-10-11：本次修改原因：后台任务运行期间禁止换账号或重新绑定，避免查询和发送账号不一致。
+        self.erp_bind_button.setEnabled(False)
+        # 2026-10-11：本次修改原因：防止同一未知记录被同时核对。
+        self.erp_reconcile_button.setEnabled(False)
+        self.miaoshou_settings.set_busy(True)
+        self.erp_mode.setEnabled(False)
         self.statusBar().showMessage("正在处理，请稍候…")
 
         # def finish(result) -> None:
@@ -576,6 +768,9 @@ class MainWindow(QMainWindow):
         self._tasks.discard(task)
         self.import_button.setEnabled(not self._tasks)
         self.refresh()
+        # 2026-10-11：本次修改原因：连接测试失败后不让状态标签继续显示正在查询。
+        if self.miaoshou_settings.status.text().startswith("正在查询"):
+            self.miaoshou_settings.status.setText("连接测试失败：" + message)
         self.statusBar().showMessage("处理失败，详细原因已写入日志", 6000)
         QMessageBox.warning(self, "处理失败", message)
 
@@ -620,6 +815,74 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "部分商品未审核", "\n".join(errors[:12]))
         else:
             self.statusBar().showMessage("所选商品已审核，可以导出", 6000)
+
+    # 2026-10-11：本次修改原因：当前商品与勾选批量回传共用入口，冻结操作开始时选用的方式。
+    def transfer_current(self) -> None:
+        if self.current_product:
+            self._transfer_products([self.current_product.id])
+
+    def transfer_selected(self) -> None:
+        self._transfer_products(list(self.checked_ids))
+
+    # 2026-10-11：本次修改原因：统一中文确认按钮，避免英文 Yes/No 让用户误以为已经开始妙手回传。
+    def _confirm_transfer(self, title: str, message: str, accept_text: str) -> bool:
+        dialog = QMessageBox(self)
+        dialog.setIcon(QMessageBox.Icon.Question)
+        dialog.setWindowTitle(title)
+        dialog.setText(message)
+        dialog.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        dialog.button(QMessageBox.StandardButton.Yes).setText(accept_text)
+        dialog.button(QMessageBox.StandardButton.No).setText("取消")
+        return dialog.exec() == QMessageBox.StandardButton.Yes
+
+    def _transfer_products(self, product_ids: list[str]) -> None:
+        if not product_ids or self._tasks:
+            return
+        mode = self.settings.erp_transfer_mode
+        if self.erp_service.unavailable_reason:
+            # 未接通时记录检查结果，不向用户展示“正在发送”的假状态。
+            notice = self.erp_service.unavailable_reason + "\n\n本次不会向妙手发送，只记录未发送原因，商品保持“未传”。"
+            if not self._confirm_transfer("回传尚未接通", notice + "\n\n是否继续记录？", "继续记录"):
+                return
+        elif not self._confirm_transfer(
+                # "确认传回妙手 ERP",
+                # f"将按“{MODE_LABELS[mode]}”处理 {len(product_ids)} 个商品。\n"
+                # "结果未知时请先到妙手核对。是否继续？",
+                # 2026-10-11：本次修改原因：实际发送前清楚说明目标为公共采集箱和操作方式。
+                "确认回传公共采集箱",
+                f"将按“{MODE_LABELS[mode]}”向妙手公共采集箱写入 {len(product_ids)} 个商品。\n"
+                "更新只合并本机修改过的字段。结果未知时请先到妙手核对。是否继续？",
+                "继续回传"):
+            return
+
+        def done(results: list[dict]) -> None:
+            counts = {state: sum(row.get("state") == state for row in results)
+                      for state in ("succeeded", "blocked", "failed", "unknown")}
+            message = (f"成功 {counts['succeeded']} 个 · 未发送 {counts['blocked']} 个 · "
+                       f"失败 {counts['failed']} 个 · 结果未知 {counts['unknown']} 个")
+            failures = [row for row in results if row.get("state") != "succeeded"]
+            if failures:
+                message += "\n\n" + "\n\n".join(row["message"] for row in failures[:3])
+                message += "\n\n完整原因见“回传记录”。"
+            QMessageBox.information(self, "回传处理结果", message)
+
+        self.run_task(lambda: self.erp_service.transfer(product_ids, mode), done)
+
+    # 2026-10-11：本次修改原因：查看原始发送快照之外的任务摘要，说明失败原因和对应商品版本。
+    def show_erp_records(self) -> None:
+        records = self.repository.erp_transfers()
+        titles = {product.id: product.title or product.main_code for product in self._products}
+        lines = []
+        for record in records:
+            lines.append(
+                f"{readable_time(record['created_at'])}  {titles.get(record['product_id'], record['product_id'])}\n"
+                f"方式：{MODE_LABELS.get(record['mode'], record['mode'])}  ·  v{record['revision']}  ·  "
+                f"{STATE_LABELS.get(record['state'], record['state'])}\n"
+                f"记录：{record['id']}\n妙手目标：{record['target_id'] or '尚无'}\n{record['message']}"
+                # 2026-10-11：本次修改原因：显示真实接口响应以便核对错误码，服务层已剥离凭证和签名。
+                + "\n回执：" + json.dumps(json.loads(record["receipt"]), ensure_ascii=False, indent=2)
+            )
+        self.text_dialog("妙手回传记录", "\n\n".join(lines) or "暂无回传记录。")
 
     def export_selected(self) -> None:
         if not self.checked_ids:
@@ -707,10 +970,29 @@ class MainWindow(QMainWindow):
 
     def save_port(self) -> None:
         try:
-            saved = Settings(self.settings.data_dir, self.settings.token, self.port.value())
+            # saved = Settings(self.settings.data_dir, self.settings.token, self.port.value())
+            # 2026-10-11：本次修改原因：保存端口时保留 ERP 回传方式；仅下一次启动应用新端口。
+            saved = Settings(self.settings.data_dir, self.settings.token, self.port.value(), self.settings.erp_transfer_mode)
             saved.save()
             QMessageBox.information(self, "设置已保存", f"端口 {saved.port} 将在重启后生效。当前接收地址保持显示实际运行端口。")
         except OSError as error:
+            QMessageBox.warning(self, "保存失败", str(error))
+
+    # 2026-10-11：本次修改原因：回传方式保存后立即生效，并保留用户已保存但尚未重启的端口设置。
+    def save_erp_mode(self) -> None:
+        # 2026-10-11：本次修改原因：发送过程中保存按钮不应切换当前任务方式。
+        if self._tasks:
+            return
+        try:
+            target = self.settings.data_dir / "settings.json"
+            content = json.loads(target.read_text(encoding="utf-8")) if target.exists() else {}
+            mode = str(self.erp_mode.currentData())
+            saved = Settings(self.settings.data_dir, self.settings.token, int(content.get("port", self.settings.port)), mode)
+            saved.save()
+            self.settings.erp_transfer_mode = mode
+            self.update_selection()
+            QMessageBox.information(self, "回传方式已保存", f"当前方式：{MODE_LABELS[mode]}。下一次回传立即使用。")
+        except (OSError, ValueError) as error:
             QMessageBox.warning(self, "保存失败", str(error))
 
     def show_protocol(self) -> None:
@@ -724,6 +1006,40 @@ class MainWindow(QMainWindow):
                          "Authorization: Bearer <连接设置中的接入密钥>\n\n" + json.dumps(sample, ensure_ascii=False, indent=2)
                          + "\n\nHTTP 200 + accepted:true 表示材料已留档，state 表示解析状态。"
                          "\n解析失败也会留档；传输失败应由插件独立重试，不阻断妙手上传。")
+
+    # 2026-10-11：本次修改原因：显示回执时绑定当前配置账号，保留旧记录供核查。
+    def erp_display_status(self, product: Product) -> str:
+        account = self.miaoshou_config.config.account_id
+        return product.erp_status if account and product.erp_account_id == account else "未传"
+
+    # 2026-10-11：本次修改原因：关联对话框只读查询妙手，人工确认后写本地关联信息。
+    def bind_erp_current(self) -> None:
+        if self._tasks or not self.current_product:
+            return
+        if self.erp_service.unavailable_reason:
+            QMessageBox.information(self, "请先配置妙手回传", self.erp_service.unavailable_reason)
+            return
+        product = self.repository.product(self.current_product.id)
+        if product and MiaoshouBindingDialog(self.repository, product, self.miaoshou_adapter,
+                                            self.run_task, self).exec() == QDialog.DialogCode.Accepted:
+            self.refresh()
+            self.statusBar().showMessage("已关联妙手公共采集箱原商品。关联没有修改妙手商品。", 6000)
+
+    # 2026-10-11：本次修改原因：用户先在妙手确定候选目标，再读取详情精确核对，不自动猜测新增 ID。
+    def reconcile_erp_current(self) -> None:
+        if self._tasks or not self.current_product:
+            return
+        record = next((row for row in self.repository.erp_transfers(self.current_product.id) if row["state"] == "unknown"), None)
+        if not record:
+            QMessageBox.information(self, "无需核对", "当前商品没有结果未知的回传记录。")
+            return
+        snapshot = json.loads(record["snapshot"])
+        target, ok = QInputDialog.getText(self, "只读核对未知回传",
+            "请先在妙手公共采集箱核对标题、来源和发送时间。\n填写确认属于这次回传的妙手商品 ID；程序只读取详情，字段一致才确认成功。",
+            text=snapshot.get("erp_original_id", "") if record["mode"] == "update" else "")
+        if ok and target.strip():
+            self.run_task(lambda: self.erp_service.reconcile(record["id"], target.strip()),
+                          lambda message: QMessageBox.information(self, "核对结果", message))
 
     def text_dialog(self, title: str, text: str, path: str = "") -> None:
         dialog = QDialog(self)
@@ -745,8 +1061,11 @@ class MainWindow(QMainWindow):
         dialog.exec()
 
     def closeEvent(self, event) -> None:
-        if self._tasks:
-            QMessageBox.information(self, "任务正在进行", "请等待当前导入或导出完成后再关闭，避免材料保存不完整。")
+        # if self._tasks:
+        #     QMessageBox.information(self, "任务正在进行", "请等待当前导入或导出完成后再关闭，避免材料保存不完整。")
+        # 2026-10-11：本次修改原因：AI 任务进行中保护候选和素材留档。
+        if self._tasks or self.ai_hub.busy:
+            QMessageBox.information(self, "任务正在进行", "请等待当前导入、导出或 AI 任务完成后再关闭。")
             event.ignore()
             return
         super().closeEvent(event)

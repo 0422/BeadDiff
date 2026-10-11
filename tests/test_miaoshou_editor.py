@@ -68,3 +68,30 @@ def test_new_attachments_and_shipping_fields_are_saved(editor):
     saved = editor.collect()
     assert saved.attributes == {"材料": "天然石"} and saved.simple_description == "材料:天然石"
     assert all(getattr(saved, name) == value for name, value in values.items())
+
+
+# 2026-10-11：本次修改原因：保存入口不能把 SKU 币种等初始化规范化误标成商品内容修改。
+def test_save_without_form_change_preserves_original_business_content(editor):
+    class RecordingRepository:
+        def save_product(self, product, approve=False):
+            self.saved = product
+            self.approve = approve
+
+    repository = RecordingRepository()
+    editor.repository = repository
+    editor.save_product(False)
+    assert repository.saved.business_content() == editor.product.business_content()
+    assert not repository.saved.content_modified
+
+
+# 2026-10-11：本次修改原因：真实字段改动仍需应用到保存商品，不能被空保存保护吞掉。
+def test_save_changed_title_keeps_user_edit(editor):
+    class RecordingRepository:
+        def save_product(self, product, approve=False):
+            self.saved = product
+
+    repository = RecordingRepository()
+    editor.repository = repository
+    editor.fields["title"].setText("新标题")
+    editor.save_product(False)
+    assert repository.saved.title == "新标题"

@@ -38,6 +38,9 @@ def main() -> int:
         log_dir.mkdir(exist_ok=True)
         handler = RotatingFileHandler(log_dir / "beaddiff.log", maxBytes=2_000_000, backupCount=3, encoding="utf-8")
         logging.basicConfig(level=logging.INFO, handlers=[handler], format="%(asctime)s %(levelname)s %(message)s")
+        # 2026-10-11：本次修改原因：不把模型或签名图片 URL 的查询参数记录到 HTTP 请求日志。
+        logging.getLogger("httpx").setLevel(logging.WARNING)
+        logging.getLogger("httpcore").setLevel(logging.WARNING)
         repository = Repository(settings.data_dir)
         service = CaptureService(repository)
         bridge = EventBridge()

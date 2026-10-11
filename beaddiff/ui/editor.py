@@ -26,6 +26,14 @@ from ..content import attribute_description, detail_html, sku_image_groups, with
 from .media_list import MediaList
 from .rich_description import RichDescription
 
+# 2026-10-11：本次修改原因：字段就地 AI 入口复用公共服务，生成结果先应用到表单，再由原保存流程版本化。
+from html import escape
+import re
+from ..ai.service import AIService
+from ..assets import valid_media_url
+from .ai_runner import TaskHub
+from .ai_workspace import AIWorkspace
+
 
 def text_editor(text: str = "", placeholder: str = "", height: int = 100) -> QPlainTextEdit:
     editor = QPlainTextEdit(text)
@@ -35,11 +43,16 @@ def text_editor(text: str = "", placeholder: str = "", height: int = 100) -> QPl
 
 
 class ProductEditor(QDialog):
-    def __init__(self, repository: Repository, product: Product, network: QNetworkAccessManager, parent=None):
+    # def __init__(self, repository: Repository, product: Product, network: QNetworkAccessManager, parent=None):
+    # 2026-10-11：本次修改原因：两条来源共用模型服务与后台任务，兼容现有编辑器构造方式。
+    def __init__(self, repository: Repository, product: Product, network: QNetworkAccessManager, parent=None,
+                 ai_service: AIService | None = None, ai_hub: TaskHub | None = None):
         super().__init__(parent)
         self.repository, self.product, self.dirty = repository, product, False
         # 2026-10-11：本次修改原因：SKU 预览复用主窗口的异步图片连接。
         self.network = network
+        self.ai_service = ai_service
+        self.ai_hub = ai_hub or TaskHub(self)
         self.setWindowTitle(f"编辑商品 · {product.main_code}")
         self.resize(1120, 790)
         self.setMinimumSize(940, 650)
@@ -84,6 +97,11 @@ class ProductEditor(QDialog):
         self.detail_images.textChanged.connect(self.mark_dirty)
         self.tabs.currentChanged.connect(lambda _index: self.refresh_sku_images())
         self.dirty = False
+        # 2026-10-11：本次修改原因：记录表单初始显示内容，避免描述回退和 SKU 币种规范化把直接保存误判为人工修改。
+        try:
+            self.initial_form_content = self.collect().business_content()
+        except ValueError:
+            self.initial_form_content = None
 
     def mark_dirty(self, *_args) -> None:
         self.dirty = True
@@ -113,13 +131,17 @@ class ProductEditor(QDialog):
     # 2026-10-11：本次修改原因：按妙手基本信息区分简易描述和图片式详细描述。
     def _miaoshou_basic_tab(self) -> None:
         form = self._tab_form("基本信息")
-        form.addRow("产品标题 *", self._field("title", "填写面向销售渠道的产品标题"))
+        # form.addRow("产品标题 *", self._field("title", "填写面向销售渠道的产品标题"))
+        # 2026-10-11：本次修改原因：标题栏右侧提供妙手式 AI 按钮。
+        self.ai_field(form, "产品标题 *", self._field("title", "填写面向销售渠道的产品标题"), "title")
         form.addRow("产品主编号 *", self._field("main_code", "同一商品的 SKU 共用一个产品主编号"))
         simple = self.product.simple_description
         if not simple and "simple_description" not in self.product.manual_fields:
             simple = attribute_description(self.product.attributes)
         self.simple_description = text_editor(simple, "产品简述；可从产品属性生成", 140)
-        form.addRow("简易描述", self.simple_description)
+        # form.addRow("简易描述", self.simple_description)
+        # 2026-10-11：本次修改原因：简易描述使用同一文本模型入口。
+        self.ai_field(form, "简易描述", self.simple_description, "simple_description")
         form.addRow("", button("从产品属性更新简易描述", self.describe_attributes))
         # 2026-10-11：本次修改原因：说明简易描述与 22 列模板的映射边界，避免编辑后误以为会单列导出。
         form.addRow("", label("简易描述单独保存在本地；当前模板没有简易描述列，产品属性导出到“自定义属性”，图文详情导出到“详情描述”。", "hint", True))
@@ -128,7 +150,10 @@ class ProductEditor(QDialog):
             legacy_text = self.product.description if "description" in self.product.manual_fields else ""
             html = detail_html(legacy_text, self.product.detail_images)
         self.rich_description = RichDescription(self.network, html)
-        form.addRow("详细描述", self.rich_description)
+        # form.addRow("详细描述", self.rich_description)
+        # 2026-10-11：本次修改原因：详情支持 AI 文案与其中单张图片处理。
+        self.ai_field(form, "详细描述", self.rich_description, "description_html")
+        self.rich_description.aiRequested.connect(lambda address: self.open_ai("image", "html", address))
         form.addRow("", button("用详情图更新图文描述", self.describe_images))
 
     # 2026-10-11：本次修改原因：产品属性按妙手的名称/值两列编辑，而非仅展示一段文字。
@@ -197,11 +222,18 @@ class ProductEditor(QDialog):
     # 2026-10-11：本次修改原因：主图支持顺序维护和尺寸核对，SKU 图片按销售属性分组展示。
     def _miaoshou_images_tab(self) -> None:
         form = self._tab_form("产品图片")
-        self.images = MediaList(self.product.images, self.product.image_sizes)
+        # self.images = MediaList(self.product.images, self.product.image_sizes)
+        # 2026-10-11：本次修改原因：商品图片支持本地上传和单图 AI，套图仍保持可排序图片组。
+        assets = self.ai_service.assets if self.ai_service else None
+        self.images = MediaList(self.product.images, self.product.image_sizes, assets, enable_ai=True)
+        self.images.aiRequested.connect(lambda address: self.open_ai("image", "images", address))
         self.product_gallery = ImageGallery(self.network)
+        self.product_gallery.enable_ai = True
+        self.product_gallery.aiRequested.connect(lambda address: self.open_ai("image", "images", address))
         # 2026-10-11：本次修改原因：预览返回实际图片尺寸，补齐源材料未提供的尺寸显示。
         self.product_gallery.sizeLoaded.connect(self.images.update_size)
         form.addRow("产品图片 *", self.images)
+        form.addRow("", button("AI 生成套图", lambda: self.open_ai("image_set", "images")))
         form.addRow("", label("第一张为主图，可上移/下移调整顺序；像素尺寸仅显示采集材料的明确值。", "hint", True))
         form.addRow("", self.product_gallery)
         self.sku_group_dimension = QComboBox()
@@ -227,8 +259,13 @@ class ProductEditor(QDialog):
         form.addRow("", self.sku_group_table)
         self.sku_group_dimension.currentIndexChanged.connect(lambda _index: self.refresh_sku_images())
         self.sku_group.currentIndexChanged.connect(lambda _index: self.render_sku_group())
-        self.detail_images = MediaList(self.product.detail_images, self.product.image_sizes)
+        # self.detail_images = MediaList(self.product.detail_images, self.product.image_sizes)
+        # 2026-10-11：本次修改原因：详情图同样可上传和 AI 修改，并同步已有正文中的对应图。
+        self.detail_images = MediaList(self.product.detail_images, self.product.image_sizes, assets, enable_ai=True)
+        self.detail_images.aiRequested.connect(lambda address: self.open_ai("image", "detail_images", address))
         self.detail_gallery = ImageGallery(self.network)
+        self.detail_gallery.enable_ai = True
+        self.detail_gallery.aiRequested.connect(lambda address: self.open_ai("image", "detail_images", address))
         self.detail_gallery.sizeLoaded.connect(self.detail_images.update_size)
         form.addRow("详情图片", self.detail_images)
         form.addRow("", self.detail_gallery)
@@ -323,6 +360,10 @@ class ProductEditor(QDialog):
         form = self._tab_form("产品视频")
         form.addRow("产品视频", self._field("video", "HTTP/HTTPS 视频链接"))
         form.addRow("", button("打开 / 播放视频", self.open_video))
+        # 2026-10-11：本次修改原因：视频保留统一功能位置，当前不发起视频生成请求。
+        placeholder = button("AI 生成视频 · 暂未开放")
+        placeholder.setEnabled(False)
+        form.addRow("", placeholder)
         form.addRow("", label("来源视频单独解析保存；点击后通过浏览器播放。", "hint", True))
 
     def _certification_tab(self) -> None:
@@ -347,6 +388,9 @@ class ProductEditor(QDialog):
         form.addRow("货源 ID", self._field("source_id", readonly=True))
         form.addRow("来源站点", self._field("site", readonly=True))
         form.addRow("货源备注", self._field("source_remark", "采购或货源说明"))
+        # 2026-10-11：本次修改原因：公开采集箱单规格新增要求货源价，提供独立输入以免与销售金额混淆。
+        form.addRow("回传货源价", self._field("supply_price", "数值金额，币种使用基本信息中的商品币种"))
+        form.addRow("", label("单规格新增必须有货源价。优先使用这里的金额，否则读取已确认币种的采集货源价；销售金额不会代填货源价。", "hint", True))
         form.addRow("", label("货源备注在本地保存，现有 22 列模板没有对应列。", "hint", True))
 
     def open_attachment(self, key: str) -> None:
@@ -425,7 +469,9 @@ class ProductEditor(QDialog):
         # self.preview.set_url(urls[0].strip() if urls else "")
         # 2026-10-10：本次修改原因：无效链接保留在表单里供修正，不交给图片下载器。
         url = urls[0].strip() if urls else ""
-        self.preview.set_url(url if valid_url(url) else "")
+        # self.preview.set_url(url if valid_url(url) else "")
+        # 2026-10-11：本次修改原因：首图预览也支持受管理的本机素材。
+        self.preview.set_url(url if valid_media_url(url) else "")
 
     def _sku_tab(self) -> None:
         page = QWidget()
@@ -490,6 +536,8 @@ class ProductEditor(QDialog):
         preview_row.addWidget(self.sku_preview)
         self.sku_source_summary = label("选择 SKU 查看规格图片和来源库存信息。", "hint", True)
         preview_row.addWidget(self.sku_source_summary, 1)
+        # 2026-10-11：本次修改原因：SKU 改图显式绑定所选规格，避免改动其他颜色的图片。
+        preview_row.addWidget(button("AI 改当前 SKU 图", self.open_sku_ai))
         layout.addLayout(preview_row)
         self.sku_table.itemSelectionChanged.connect(self.preview_sku)
         self.sku_table.itemChanged.connect(self.sku_item_changed)
@@ -515,7 +563,9 @@ class ProductEditor(QDialog):
             self.sku_source_summary.setText("选择 SKU 查看规格图片和来源库存信息。")
             return
         values = [self.sku_table.item(row, col).text().strip() for col in range(14)]
-        self.sku_preview.set_url(values[8] if valid_url(values[8]) else "")
+        # self.sku_preview.set_url(values[8] if valid_url(values[8]) else "")
+        # 2026-10-11：本次修改原因：SKU 预览显示本地生成素材。
+        self.sku_preview.set_url(values[8] if valid_media_url(values[8]) else "")
         self.sku_source_summary.setText(
             f"{values[1]}  ·  {values[2]}\n来源价 {values[3] or '未提供'}  {values[10]}\n"
             f"来源库存 {values[11] or '未提供'}  ·  限购 {values[12] or '未提供'}  ·  {values[13]}\n"
@@ -639,9 +689,112 @@ class ProductEditor(QDialog):
         except ValueError as error:
             QMessageBox.warning(self, "字段格式", str(error))
 
+    # 2026-10-11：本次修改原因：在字段标题行右侧放置 AI 按钮，避免将模型调用写进控件。
+    def ai_field(self, form: QFormLayout, caption: str, editor: QWidget, operation: str):
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        heading = QHBoxLayout()
+        heading.addWidget(label(caption))
+        heading.addStretch()
+        heading.addWidget(button("AI 生成", lambda: self.open_ai(operation)))
+        layout.addLayout(heading)
+        layout.addWidget(editor)
+        form.addRow("", container)
+
+    def open_sku_ai(self):
+        row = self.sku_table.currentRow()
+        item = self.sku_table.item(row, 8) if row >= 0 else None
+        if not item:
+            QMessageBox.information(self, "请选择 SKU", "请先选择需要处理图片的 SKU。")
+            return
+        self.open_ai("image", "sku", item.text().strip(), row)
+
+    def open_ai(self, operation: str, target: str = "images", address: str = "", sku_row: int = -1):
+        if not self.ai_service:
+            QMessageBox.information(self, "AI 配置", "请从商品工作台打开编辑器，并在设置 → AI 模型中完成配置。")
+            return
+        try:
+            snapshot = self.collect().to_dict()
+        except ValueError as error:
+            QMessageBox.warning(self, "请检查商品事实", str(error))
+            return
+        # 2026-10-11：本次修改原因：SKU 改图只提供当前规格事实，避免其他颜色和尺寸混入。
+        if target == "sku" and 0 <= sku_row < len(snapshot.get("skus", [])):
+            snapshot["skus"] = [snapshot["skus"][sku_row]]
+        workspace = AIWorkspace(self.ai_service, self.ai_hub, snapshot, operation, self.network, address, self)
+        # 2026-10-11：本次修改原因：SKU 字段只能替换单图，候选默认只生成一张。
+        if target == "sku":
+            workspace.count.setValue(1)
+            workspace.application.setVisible(False)
+        if workspace.exec() != QDialog.DialogCode.Accepted:
+            return
+        if operation == "title":
+            self.fields["title"].setText(workspace.applied_text)
+        elif operation == "simple_description":
+            self.simple_description.setPlainText(workspace.applied_text)
+        elif operation == "description_html":
+            self.rich_description.set_html(workspace.applied_text)
+        elif workspace.applied_assets:
+            values = workspace.applied_assets
+            if target == "sku":
+                if len(values) != 1:
+                    QMessageBox.information(self, "SKU 图片", "一个 SKU 图片字段只能应用一张图，请从历史候选中勾选一张后应用。")
+                    return
+                self.sku_table.item(sku_row, 8).setText(values[0])
+            elif target == "html":
+                # self.replace_description_image(address, values)
+                # 2026-10-11：本次修改原因：详情正文按用户的替换/追加选择处理，同步对应详情图列表。
+                if workspace.apply_mode == "append":
+                    self.rich_description.set_html(self.rich_description.html() + detail_html("", values))
+                    self.detail_images.set_urls(self.detail_images.toPlainText().splitlines() + values)
+                else:
+                    self.replace_description_image(address, values)
+                    old = self.detail_images.toPlainText().splitlines()
+                    if address in old:
+                        index = old.index(address)
+                        self.detail_images.set_urls(old[:index] + values + old[index + 1:])
+                self.detail_images.textChanged.emit()
+            else:
+                media = self.detail_images if target == "detail_images" else self.images
+                old = media.toPlainText().splitlines()
+                if workspace.apply_mode == "replace_set":
+                    updated = values
+                elif workspace.apply_mode == "replace" and address in old:
+                    index = old.index(address)
+                    updated = old[:index] + values + old[index + 1:]
+                else:
+                    updated = old + values
+                media.set_urls(updated)
+                media.textChanged.emit()
+                if target == "detail_images" and workspace.apply_mode == "replace":
+                    self.replace_description_image(address, values)
+                if workspace.result:
+                    for asset in workspace.result.assets:
+                        media.update_size(asset.uri, asset.width, asset.height)
+        self.mark_dirty()
+
+    def replace_description_image(self, address: str, values: list[str]):
+        html = self.rich_description.html()
+        pattern = r'<img\b[^>]*\bsrc="' + re.escape(escape(address, quote=True)) + r'"[^>]*>'
+        # updated = re.sub(pattern, lambda _match: detail_html("", values), html, flags=re.I)
+        # 2026-10-11：本次修改原因：替换图片标签时不嵌套段落，保留原图所在的正文结构。
+        replacement = "".join(f'<img src="{escape(value, quote=True)}" width="640" />'
+                              for value in values if valid_media_url(value))
+        updated = re.sub(pattern, lambda _match: replacement, html, flags=re.I)
+        if updated != html:
+            self.rich_description.set_html(updated)
+
     def save_product(self, approve: bool) -> None:
         try:
-            self.repository.save_product(self.collect(), approve=approve)
+            # self.repository.save_product(self.collect(), approve=approve)
+            # 2026-10-11：本次修改原因：没有实际表单内容改动时保留原商品内容，只存预览像素缓存和审核操作。
+            product = self.collect()
+            if product.business_content() == self.initial_form_content:
+                sizes = product.image_sizes
+                product = Product.from_dict(self.product.to_dict())
+                product.image_sizes = sizes
+            self.repository.save_product(product, approve=approve)
         except Exception as error:
             QMessageBox.warning(self, "未能保存", str(error))
             return

@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "active_text_id": "text-default",
+  "active_image_id": "image-default",
+  "profiles": [
+    {
+      "id": "text-default",
+      "category": "text",
+      "name": "日常商品文案",
+      "provider": "填写兼容协议服务厂商",
+      "url": "https://your-text-api.example/v1",
+      "key": "替换为你自己的文本模型API-Key",
+      "modelname": "替换为实际文本模型名称",
+      "supports_vision": false,
+      "timeout": 300
+    },
+    {
+      "id": "image-default",
+      "category": "image",
+      "name": "商品图片编辑",
+      "provider": "填写兼容生图服务厂商",
+      "url": "https://your-image-api.example/v1",
+      "key": "替换为你自己的图片模型API-Key",
+      "modelname": "替换为实际图片模型名称",
+      "image_mode": "auto",
+      "timeout": 300
+    }
+  ]
+}

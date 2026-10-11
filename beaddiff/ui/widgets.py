@@ -4,6 +4,9 @@ from __future__ import annotations
 import logging
 from typing import Callable
 
+# 2026-10-11：本次修改原因：缩略图读取本地素材，图库发出单图 AI 操作信号。
+from ..assets import local_asset_path, valid_media_url
+
 from PySide6.QtCore import QObject, QRunnable, Qt, QUrl, Signal
 from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
@@ -135,6 +138,17 @@ class ImagePreview(QLabel):
         if not url:
             self.setText("暂无图片")
             return
+        # 2026-10-11：本次修改原因：本地生成图直接加载，避免当作远程 HTTP 链接请求。
+        local = local_asset_path(url)
+        if local:
+            pixmap = QPixmap(str(local))
+            if not pixmap.isNull():
+                self._pixmap = pixmap
+                self.dimensionsLoaded.emit(pixmap.width(), pixmap.height())
+                self._fit()
+            else:
+                self.setText("本地图片无法解码")
+            return
         self.setText("正在加载图片…")
         request = QNetworkRequest(QUrl(url))
         request.setTransferTimeout(8000)
@@ -185,6 +199,9 @@ class ImageGallery(QFrame):
     # 2026-10-11：本次修改原因：图库把真实图片尺寸传给对应图片列表，补齐材料缺少的像素信息。
     sizeLoaded = Signal(str, int, int)
 
+    # 2026-10-11：本次修改原因：每张图片提供就地 AI 改图入口。
+    aiRequested = Signal(str)
+
     def __init__(self, network: QNetworkAccessManager):
         super().__init__()
         self.network = network
@@ -192,6 +209,7 @@ class ImageGallery(QFrame):
         self.page = 0
         self.loaded = False
         self.previews: list[ImagePreview] = []
+        self.enable_ai = False
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         actions = QHBoxLayout()
@@ -231,7 +249,8 @@ class ImageGallery(QFrame):
         self._render()
 
     def _render(self) -> None:
-        from ..models import valid_url
+        # from ..models import valid_url
+        # 2026-10-11：本次修改原因：图库复用统一素材地址判断。
 
         for preview in self.previews:
             preview.set_url("")
@@ -246,7 +265,9 @@ class ImageGallery(QFrame):
             contents = QVBoxLayout(tile)
             contents.setContentsMargins(0, 0, 0, 0)
             preview = ImagePreview(self.network, 125)
-            preview.set_url(url if valid_url(url) else "")
+            # preview.set_url(url if valid_url(url) else "")
+            # 2026-10-11：本次修改原因：本地与远程图片使用相同的预览入口。
+            # preview.set_url(url if valid_media_url(url) else "")
             self.previews.append(preview)
             contents.addWidget(preview)
             caption = label(f"第 {start + index + 1} 张", "muted")
@@ -255,7 +276,12 @@ class ImageGallery(QFrame):
                 lambda width, height, caption=caption, number=start + index + 1, url=url:
                 self._image_size(caption, number, url, width, height))
             caption.setToolTip(url)
+            # 2026-10-11：本次修改原因：本地图片同步返回尺寸，必须先连接信号再读取。
+            preview.set_url(url if valid_media_url(url) else "")
             contents.addWidget(caption)
+            # 2026-10-11：本次修改原因：商品图库的 AI 入口携带准确的当前图片地址。
+            if self.enable_ai:
+                contents.addWidget(button("AI 改图", lambda _checked=False, address=url: self.aiRequested.emit(address)))
             self.grid.addWidget(tile, index // 3, index % 3)
         self.loaded = True
         self._counts()
