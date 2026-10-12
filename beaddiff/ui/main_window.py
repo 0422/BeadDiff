@@ -43,6 +43,8 @@ from .miaoshou_binding import MiaoshouBindingDialog
 from .miaoshou_settings import MiaoshouSettingsPage
 # 2026-10-11：本次修改原因：核对未知回传时允许填写经人工在妙手找到的目标商品 ID。
 from PySide6.QtWidgets import QInputDialog
+# 2026-10-12：本次修改原因：商品库直接导入官方采集箱数据，插件接收及文件导入保持独立可用。
+from .miaoshou_import import MiaoshouImportDialog
 
 
 def readable_time(value: str) -> str:
@@ -179,16 +181,26 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(18)
-        heading, _ = self._heading("商品工作台", "采集素材集中管理，完善商品后交给妙手导入")
+        # heading, _ = self._heading("商品工作台", "采集素材集中管理，完善商品后交给妙手导入")
+        # 2026-10-12：本次修改原因：增加 ERP 数据入口后把建档操作移至独立一行，避免标题区挤压。
+        heading, _ = self._heading("商品工作台", "管理采集与上传商品，编辑后回传妙手公共采集箱")
         self.receiver_badge = label("正在初始化", "statusBadge")
         heading.addWidget(self.receiver_badge)
         heading.addSpacing(8)
         heading.addWidget(button("刷新", self.refresh))
         # 2026-10-11：本次修改原因：白底图路线直接建草稿并进入共用商品编辑页。
-        heading.addWidget(button("上传白底图建商品", self.create_from_photos, symbol="import"))
+        # heading.addWidget(button("上传白底图建商品", self.create_from_photos, symbol="import"))
         self.import_button = button("导入采集文件", self.import_files, primary=True, symbol="import")
-        heading.addWidget(self.import_button)
+        # heading.addWidget(self.import_button)
         layout.addLayout(heading)
+        # 2026-10-12：本次修改原因：ERP 查询导入作为主要建档入口，另外两条本机素材路线仍可直接操作。
+        intake = QHBoxLayout()
+        self.erp_import_button = button("从妙手采集箱导入", self.import_miaoshou, primary=True, symbol="import")
+        intake.addWidget(self.erp_import_button)
+        intake.addWidget(button("上传白底图建商品", self.create_from_photos, symbol="import"))
+        intake.addWidget(self.import_button)
+        intake.addStretch()
+        layout.addLayout(intake)
         metrics = QHBoxLayout()
         metrics.setSpacing(14)
         self.count_labels = {}
@@ -322,6 +334,9 @@ class MainWindow(QMainWindow):
         # 2026-10-11：本次修改原因：超时后查询实际详情，不能直接重发新增或手动勾选已传。
         self.erp_reconcile_button = button("核对未知回传（只读）", self.reconcile_erp_current)
         contents.addWidget(self.erp_reconcile_button)
+        # 2026-10-12：本次修改原因：本机商品提供留存的完整 ERP 导入详情查看入口，便于比较未展示的规格/附件字段。
+        self.erp_snapshot_button = button("查看妙手导入原始详情", self.show_miaoshou_snapshot)
+        contents.addWidget(self.erp_snapshot_button)
         contents.addWidget(self.source_button)
         return frame
 
@@ -618,8 +633,13 @@ class MainWindow(QMainWindow):
         self.erp_current_button.setEnabled(product is not None and not self._tasks)
         # 2026-10-11：本次修改原因：查询、发送期间锁住关联和凭证编辑，保持同一账号的任务快照。
         self.erp_bind_button.setEnabled(product is not None and not self._tasks)
+        # 2026-10-12：本次修改原因：API 商品已有稳定原商品关联，不使用按平台规格猜测的重新关联流程。
+        if product and product.erp_imported:
+            self.erp_bind_button.setEnabled(False)
         # 2026-10-11：本次修改原因：只读核对复用后台任务状态。
         self.erp_reconcile_button.setEnabled(product is not None and not self._tasks)
+        # 2026-10-12：本次修改原因：仅 API 导入商品具有远端快照，插件原始材料仍从采集记录查看。
+        self.erp_snapshot_button.setEnabled(bool(product and product.erp_remote_snapshot))
         self.miaoshou_settings.set_busy(bool(self._tasks))
         self.erp_mode.setEnabled(not self._tasks)
         self.erp_binding_hint.setText(
@@ -644,13 +664,18 @@ class MainWindow(QMainWindow):
             f"{len(product.skus)} 个 SKU  ·  {len(product.attributes)} 项属性  ·  v{product.revision}\n"
             f"主图 {len(product.images)} 张  ·  详情图 {len(product.detail_images)} 张"
             + ("  ·  有视频" if product.video else ""))
+        # 2026-10-12：本次修改原因：商品库区分 API 导入与原始插件接收，并提供完整远端快照查看入口。
+        if product.erp_imported:
+            self.inspector_meta.setText(self.inspector_meta.text() + "\n数据来源：妙手 API 导入")
         # self.inspector_status.setText(f"{product.status}  ·  售价币种 {product.currency or '待确认'}")
         # 2026-10-11：本次修改原因：速览与商品列表展示相同的修改和回传状态。
         self.inspector_status.setText(f"{product.status}  ·  售价币种 {product.currency or '待确认'}\n"
                                       # f"{product.modification_status}  ·  传回 ERP：{product.erp_status}")
                                       # 2026-10-11：本次修改原因：速览与列表一致按当前账号展示回传状态。
                                       f"{product.modification_status}  ·  传回 ERP：{self.erp_display_status(product)}")
-        issues = product.issues()
+        # issues = product.issues()
+        # 2026-10-12：本次修改原因：速览问题清单与 API 原商品增量审核保持一致。
+        issues = product.review_issues()
         text = "待完善\n" + "\n".join(f"• {issue}" for issue in issues[:14]) if issues else "必填信息已完善，请人工核对来源、售价和规格。"
         if product.warnings:
             text += "\n\n采集提示\n" + "\n".join(f"• {warning}" for warning in product.warnings)
@@ -697,6 +722,29 @@ class MainWindow(QMainWindow):
                 self.refresh()
                 self.statusBar().showMessage("商品已保存，编辑版本已记录", 6000)
 
+    # 2026-10-12：本次修改原因：API 导入自动关联原商品，返回商品库定位最后导入项，编辑与 AI 不需要另写流程。
+    def import_miaoshou(self) -> None:
+        if self._tasks:
+            return
+        if self.erp_service.unavailable_reason:
+            QMessageBox.information(self, "请先配置妙手接口", self.erp_service.unavailable_reason + "\n请进入设置 → 妙手回传填写凭证。")
+            return
+        dialog = MiaoshouImportDialog(self.repository, self.miaoshou_adapter, self.run_task, self)
+        dialog.exec()
+        if dialog.last_product_id:
+            self.active_filter = "全部"
+            self.filters.button(0).setChecked(True)
+            self.source_filter.setCurrentText("全部来源")
+            self.search.clear()
+            self.current_product = self.repository.product(dialog.last_product_id)
+        self.refresh()
+
+    # 2026-10-12：本次修改原因：查看首次导入的全部字段不发起网络请求，也不覆盖本机工作内容。
+    def show_miaoshou_snapshot(self) -> None:
+        if self.current_product and self.current_product.erp_remote_snapshot:
+            self.text_dialog("妙手 API 原始详情（首次导入快照）",
+                             json.dumps(self.current_product.erp_remote_snapshot, ensure_ascii=False, indent=2))
+
     # 2026-10-11：本次修改原因：上传商品与采集商品共用编辑、版本和 AI 处理流程。
     def create_from_photos(self) -> None:
         creation = ProductCreation(self.repository, self.assets, self)
@@ -727,6 +775,8 @@ class MainWindow(QMainWindow):
         task.callback = callback
         self._tasks.add(task)
         self.import_button.setEnabled(False)
+        # 2026-10-12：本次修改原因：查询导入与回传共用任务锁，处理期间不允许启动第二个 ERP 导入窗口。
+        self.erp_import_button.setEnabled(False)
         # 2026-10-11：本次修改原因：后台任务运行时禁用回传按钮，避免重复发起同一批商品。
         self.erp_button.setEnabled(False)
         self.erp_current_button.setEnabled(False)
@@ -760,6 +810,8 @@ class MainWindow(QMainWindow):
     def task_finished(self, task, result) -> None:
         self._tasks.discard(task)
         self.import_button.setEnabled(not self._tasks)
+        # 2026-10-12：本次修改原因：任务结束恢复 ERP 导入入口。
+        self.erp_import_button.setEnabled(not self._tasks)
         self.refresh()
         task.callback(result)
 
@@ -767,6 +819,8 @@ class MainWindow(QMainWindow):
     def task_failed(self, task, message: str) -> None:
         self._tasks.discard(task)
         self.import_button.setEnabled(not self._tasks)
+        # 2026-10-12：本次修改原因：查询或导入失败后同样恢复 ERP 导入入口。
+        self.erp_import_button.setEnabled(not self._tasks)
         self.refresh()
         # 2026-10-11：本次修改原因：连接测试失败后不让状态标签继续显示正在查询。
         if self.miaoshou_settings.status.text().startswith("正在查询"):
@@ -794,10 +848,22 @@ class MainWindow(QMainWindow):
 
     def approve_selected(self) -> None:
         products = [self.repository.product(product_id) for product_id in self.checked_ids]
-        invalid = [product for product in products if product and product.issues()]
+        # invalid = [product for product in products if product and product.issues()]
+        # 2026-10-12：本次修改原因：批量审核也允许原商品未改动的物流占位，不能与单条审核规则不一致。
+        invalid = [product for product in products if product and product.review_issues()]
         if invalid:
-            QMessageBox.warning(self, "请先完善商品", "以下商品尚不能审核：\n" + "\n".join(
-                f"{product.title or product.source_id}：{product.issues()[0]}" for product in invalid[:12]))
+            # QMessageBox.warning(self, "请先完善商品", "以下商品尚不能审核：\n" + "\n".join(
+            #     f"{product.title or product.source_id}：{product.review_issues()[0]}" for product in invalid[:12]))
+            # 2026-10-12：本次修改原因：批量审核汇总所有已知问题，长清单放详情而不是只显示每件商品第一个错误。
+            details = "\n\n".join(f"{product.title or product.source_id}：\n" + "\n".join(
+                f"• {issue}" for issue in product.review_issues()) for product in invalid)
+            notice = QMessageBox(self)
+            notice.setIcon(QMessageBox.Icon.Warning)
+            notice.setWindowTitle("请先完善商品")
+            notice.setText(f"所选商品中有 {len(invalid)} 件存在字段格式、数量或必填问题，尚不能审核。")
+            notice.setInformativeText("\n".join(details.splitlines()[:12]) + "\n完整问题清单请展开详情查看。")
+            notice.setDetailedText(details)
+            notice.exec()
             return
         if QMessageBox.question(self, "批量审核", f"确认已核对所选 {len(products)} 个商品的售价、币种、图片与 SKU？",
                                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,

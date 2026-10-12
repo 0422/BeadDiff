@@ -55,6 +55,17 @@ class MiaoshouSettingsPage(QWidget):
         layout.addLayout(actions)
         layout.addWidget(label("连接测试只查询 1 条公共采集箱记录；测试成功不代表已获新增/更新或图片接口权限。回传写入公共采集箱，认领和发布仍在妙手完成。", "hint", True))
         contents.addWidget(frame)
+        # 2026-10-12：本次修改原因：说明上传缓存自动复用，并给远端图片已删除或同地址图片内容改变提供恢复入口。
+        cache_frame, cache_layout = card()
+        cache_layout.addWidget(label("图片上传缓存", "sectionTitle"))
+        cache_layout.addWidget(label("每张图片成功转存后自动保存，同一账号和图片链接再次回传时复用；中途失败和重启后仍可继续使用。", "hint", True))
+        cache_layout.addWidget(label("如果已在妙手删除图片，或替换了同一链接的图片内容，请清除当前账号缓存后重新上传。清除缓存不会释放妙手图片空间容量。", "muted", True))
+        self.clear_picture_cache_button = button("清除当前账号图片缓存", self.clear_picture_cache)
+        cache_actions = QHBoxLayout()
+        cache_actions.addWidget(self.clear_picture_cache_button)
+        cache_actions.addStretch()
+        cache_layout.addLayout(cache_actions)
+        contents.addWidget(cache_frame)
         contents.addStretch()
         scroll.setWidget(body)
         outer.addWidget(scroll)
@@ -65,6 +76,8 @@ class MiaoshouSettingsPage(QWidget):
         for widget in (self.key, self.secret, self.timeout, self.rates, self.save_button,
                        self.reload_button, self.clear_button, self.test_button):
             widget.setEnabled(not busy)
+        # 2026-10-12：本次修改原因：回传运行期间不能清除正在使用的图片缓存。
+        self.clear_picture_cache_button.setEnabled(not busy)
 
     def refresh(self) -> None:
         config = self.store.config
@@ -130,3 +143,23 @@ class MiaoshouSettingsPage(QWidget):
         self.status.setText("正在查询公共采集箱连接…（使用已保存的凭证）")
         self.runner(lambda: client.list_products(size=1),
                     lambda result: self.status.setText(f"只读连接成功，公共采集箱共 {result.get('total', '未知')} 条商品。"))
+
+    # 2026-10-12：本次修改原因：用户确认后在后台清除当前已保存 AppKey 的本地映射，不删除妙手图片或其他账号缓存。
+    def clear_picture_cache(self) -> None:
+        if self.busy:
+            return
+        try:
+            account_id = self.store.get().account_id
+            if not account_id:
+                raise ValueError("请先保存需要清除图片缓存的 AppKey。")
+        except ValueError as error:
+            QMessageBox.information(self, "请先保存配置", str(error))
+            return
+        if QMessageBox.question(self, "清除本地图片上传缓存",
+                                "清除当前已保存账号的本地上传记录？妙手图片和本地商品都会保留；后续回传可能需要重新上传图片。",
+                                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                                QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
+            return
+        self.status.setText("正在清除当前账号的本地图片缓存…")
+        self.runner(lambda: self.adapter.clear_picture_cache(account_id),
+                    lambda count: self.status.setText(f"已清除当前账号 {count} 条本地图片缓存。妙手图片和商品数据已保留。"))

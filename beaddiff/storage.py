@@ -124,6 +124,25 @@ class Repository:
             return [Product.from_dict(json.loads(row["body"])) for row in connection.execute(
                 "SELECT body FROM products ORDER BY updated_at DESC, rowid DESC")]
 
+    # 2026-10-12：本次修改原因：API 导入按账号和 ERP ID 独立去重，数据库索引与平台来源分开，绝不覆盖插件商品的编辑。
+    def store_miaoshou_import(self, product: Product) -> tuple[Product, bool]:
+        if not product.erp_imported or not product.erp_original_account or not product.erp_original_id:
+            raise ValueError("API 导入商品缺少经过验证的账号或商品 ID。")
+        with self.connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            identity = ("miaoshou-api", product.erp_original_id, product.erp_original_account)
+            row = connection.execute("SELECT body FROM products WHERE source=? AND source_id=? AND site=?", identity).fetchone()
+            if row:
+                return Product.from_dict(json.loads(row["body"])), False
+            product.id = uuid.uuid4().hex
+            product.created_at = product.updated_at = product.erp_imported_at = now_iso()
+            product.revision = 1
+            product.approved = False
+            body = json.dumps(product.to_dict(), ensure_ascii=False)
+            connection.execute("INSERT INTO products VALUES (?,?,?,?,?,?)", (product.id, *identity, body, product.updated_at))
+            connection.execute("INSERT INTO product_versions VALUES (?,?,?,?)", (product.id, 1, body, product.created_at))
+        return product, True
+
     def store_parsed(self, product: Product) -> tuple[Product, bool]:
         with self.connection() as connection:
             # 2026-10-10：本次修改原因：把商品查重与首次写入放在同一个写事务内。
@@ -367,8 +386,23 @@ class Repository:
             existing = Product.from_dict(json.loads(row["body"]))
             if existing.revision != product.revision:
                 raise ValueError("商品已被其他操作更新，请关闭编辑窗口并重新打开。")
-            if approve and product.issues():
-                raise ValueError("请先完善商品：\n" + "\n".join(product.issues()[:12]))
+            # 2026-10-12：本次修改原因：手动/AI 保存检查商品全部已知格式、长度、数量及已填数值，原采集材料仍留档。
+            from .miaoshou_mapping import draft_limit_issues
+            limits = draft_limit_issues(product, existing)
+            # if limits:
+            #     raise ValueError("\n".join(limits))
+            # if approve and product.issues():
+            #     raise ValueError("请先完善商品：\n" + "\n".join(product.issues()[:12]))
+            # 2026-10-12：本次修改原因：API 原商品文本编辑按导入基线审核，未改动的空值/0 物流不阻碍保存审核。
+            # issues = product.review_issues()
+            # 2026-10-12：本次修改原因：实际 HTML/详情图更改需与保存前版本比较，避免旧图片追加影响字数校验。
+            issues = product.review_issues(existing) if approve else []
+            # if approve and issues:
+            #     raise ValueError("请先完善商品：\n" + "\n".join(issues[:12]))
+            # 2026-10-12：本次修改原因：一次汇总全部硬限制和审核必填问题；失败前不写新版本，也不把旧已审核商品当成合规。
+            errors = list(dict.fromkeys(limits + (issues if approve else [])))
+            if errors:
+                raise ValueError("请调整商品后再保存：\n" + "\n".join(f"• {message}" for message in errors))
             # 2026-10-11：本次修改原因：保存人工编辑痕迹，重新解析时保护主动修改和删除。
             self._load_manual_history(connection, existing)
             self._mark_manual_changes(existing, product)
@@ -383,6 +417,11 @@ class Repository:
             for name in ("erp_content_hash", "erp_transferred_at", "erp_transfer_mode", "erp_target_id",
                          "erp_transfer_id", "erp_original_id", "erp_original_account", "erp_sku_links",
                          "erp_update_baseline", "erp_account_id"):
+                setattr(product, name, getattr(existing, name))
+            # 2026-10-12：本次修改原因：普通编辑不能更换 API 导入身份或完整远端快照，避免旧窗口覆盖导入元数据。
+            # for name in ("erp_imported", "erp_remote_snapshot", "erp_imported_at"):
+            # 2026-10-12：本次修改原因：原始导入基线也不受普通表单保存覆盖。
+            for name in ("erp_imported", "erp_remote_snapshot", "erp_imported_at", "erp_import_baseline"):
                 setattr(product, name, getattr(existing, name))
             product.approved = approve
             product.revision += 1
@@ -480,6 +519,9 @@ class Repository:
             product = Product.from_dict(json.loads(row["body"]))
             if product.revision != expected_revision:
                 raise ValueError("商品在查询期间已被编辑，请关闭关联窗口后重新操作。")
+            # 2026-10-12：本次修改原因：API 导入账号/目标与完整快照不可被重新绑定到另一商品。
+            if product.erp_imported and (product.erp_original_account, product.erp_original_id) != (account_id, target_id):
+                raise ValueError("API 导入商品已关联其来源商品，不能改绑其他目标；请从目标账号重新导入另一条商品。")
             if connection.execute("SELECT id FROM erp_transfers WHERE product_id=? AND state IN ('sending','unknown')",
                                   (product_id,)).fetchone():
                 raise ValueError("商品存在未确认的回传结果，请先在妙手核对。")

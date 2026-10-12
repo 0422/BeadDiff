@@ -95,3 +95,34 @@ def test_save_changed_title_keeps_user_edit(editor):
     editor.fields["title"].setText("新标题")
     editor.save_product(False)
     assert repository.saved.title == "新标题"
+
+
+# 2026-10-12：本次修改原因：原始超限、程序化 AI 图片替换及移除后数量提示均按最终去重列表即时更新。
+def test_main_image_count_updates_and_preserves_over_limit_images(editor):
+    urls = [f"https://example.com/image{index}.jpg" for index in range(16)]
+    editor.images.set_urls(urls)
+    assert editor.images.table.rowCount() == 16
+    assert "16 / 15" in editor.images.count_hint.text() and "超出 1 张" in editor.images.count_hint.text()
+    editor.images.table.clearSelection()
+    editor.images.table.selectRow(15)
+    editor.images.remove_selected()
+    assert "15 / 15" in editor.images.count_hint.text() and "超出" not in editor.images.count_hint.text()
+    editor.detail_images.set_urls(urls)
+    assert "16" in editor.detail_images.count_hint.text() and "超出" not in editor.detail_images.count_hint.text()
+
+
+# 2026-10-12：本次修改原因：保存校验失败应保持编辑窗口和用户输入，不能误提示已保存或关闭。
+def test_validation_failure_keeps_editor_open_and_changes_intact(editor, monkeypatch):
+    class RejectingRepository:
+        def save_product(self, product, approve=False):
+            raise ValueError("主图共 16 张，最多支持 15 张")
+
+    messages = []
+    monkeypatch.setattr("beaddiff.ui.editor.QMessageBox.warning", lambda *args: messages.append(args[2]))
+    accepted = []
+    editor.accepted.connect(lambda: accepted.append(True))
+    editor.repository = RejectingRepository()
+    editor.fields["title"].setText("尚未保存的标题")
+    editor.save_product(True)
+    assert messages and "16 张" in messages[0]
+    assert not accepted and editor.dirty and editor.fields["title"].text() == "尚未保存的标题"

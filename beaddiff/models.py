@@ -122,6 +122,13 @@ class Product:
     # 2026-10-11：本次修改原因：单规格新增需要独立货源价，不能拿销售金额冒充货源价。
     supply_price: str = ""
 
+    # 2026-10-12：本次修改原因：API 导入保留完整详情及来源标记，界面未覆盖的字段不从原始网页重新推断。
+    erp_imported: bool = False
+    erp_remote_snapshot: dict[str, Any] = field(default_factory=dict)
+    erp_imported_at: str = ""
+    # 2026-10-12：本次修改原因：新增副本始终比较首次导入基线，不能被成功更新后的增量基线抹掉已加工字段。
+    erp_import_baseline: dict[str, Any] = field(default_factory=dict)
+
     # 2026-10-11：本次修改原因：文本、图片顺序、属性和可编辑 SKU 共用实际内容比较；排除预览缓存和来源只读价格。
     def business_content(self) -> dict[str, Any]:
         names = (
@@ -170,71 +177,139 @@ class Product:
             )
         return cls(**values)
 
-    def issues(self) -> list[str]:
+    # def issues(self) -> list[str]:
+    # 2026-10-12：本次修改原因：API 增量审核可传入导入基线，只校验改动字段；表格导出仍使用完整检查。
+    def issues(self, original: Product | None = None) -> list[str]:
         result = []
-        if not self.main_code.strip():
+        def changed(name: str) -> bool:
+            return original is None or getattr(self, name) != getattr(original, name)
+        original_skus = {sku.identity: sku for sku in original.skus} if original else {}
+        structure_changed = original is None or (
+            [(sku.identity, sku.spec1, sku.spec2, sku.specs) for sku in self.skus]
+            != [(sku.identity, sku.spec1, sku.spec2, sku.specs) for sku in original.skus]
+        )
+        # if not self.main_code.strip():
+        # 2026-10-12：本次修改原因：保留原商品未填字段，不能因只修改标题而要求补齐无关数据。
+        if changed("main_code") and not self.main_code.strip():
             result.append("缺少产品主编号")
         if not self.title.strip():
             result.append("缺少产品名称")
-        if len(self.currency.strip()) != 3 or not self.currency.isascii() or not self.currency.isalpha():
+        # if len(self.currency.strip()) != 3 or not self.currency.isascii() or not self.currency.isalpha():
+        # 2026-10-12：本次修改原因：人民币导入数据保留原币种，仅在改动币种时校验。
+        if changed("currency") and (len(self.currency.strip()) != 3 or not self.currency.isascii() or not self.currency.isalpha()):
             result.append("请确认三位货币代码，例如 USD、CNY")
-        if not self.images:
+        # if not self.images:
+        # 2026-10-12：本次修改原因：原主图不因文本编辑被连带要求补齐，主动清空仍检查。
+        if changed("images") and not self.images:
             result.append("缺少产品主图")
         # if any(not valid_url(url) for url in self.images + self.detail_images):
         #     result.append("产品图片必须是有效的 HTTP/HTTPS 链接")
         # 2026-10-11：本次修改原因：本地素材可编辑审核，丢失素材仍提示修复。
-        if any(not valid_media_url(url) for url in self.images + self.detail_images):
+        # if any(not valid_media_url(url) for url in self.images + self.detail_images):
+        # 2026-10-12：本次修改原因：只检查改动的图片列表，不把原详情图片问题归到标题修改。
+        if any(not valid_media_url(url) for name in ("images", "detail_images") if changed(name) for url in getattr(self, name)):
             result.append("产品图片链接无效或本地素材已被移动")
-        if not self.skus:
+        # if not self.skus:
+        # 2026-10-12：本次修改原因：增量审核不强制补齐原商品空 SKU；新增及导出仍完整检查。
+        if structure_changed and not self.skus:
             result.append("尚未取得实际 SKU，请补充规格")
         # 2026-10-11：本次修改原因：物流栏目按包装单位校验，尺码规格和页面默认提示不填入物流字段。
-        if self.package_weight and not positive_decimal(self.package_weight):
+        # if self.package_weight and not positive_decimal(self.package_weight):
+        # 2026-10-12：本次修改原因：妙手未填物流的 0 占位保留，改动后的物流仍检查。
+        if changed("package_weight") and self.package_weight and not positive_decimal(self.package_weight):
             result.append("包裹重量应为大于 0 的 KG 数值或留空")
-        if self.package_dimensions:
+        # if self.package_dimensions:
+        # 2026-10-12：本次修改原因：只有编辑包裹尺寸时才要求有效长宽高。
+        if changed("package_dimensions") and self.package_dimensions:
             sizes = re.split(r"\s*[xX×*]\s*", self.package_dimensions.strip())
             if len(sizes) != 3 or not all(positive_decimal(size) for size in sizes):
                 result.append("包裹尺寸应为长*宽*高，三个数值均大于 0，单位 CM")
         # 2026-10-10：本次修改原因：导出前校验来源链接、规格名称和尺寸，避免模板字段歧义。
-        if self.source_url and not valid_url(self.source_url):
+        # if self.source_url and not valid_url(self.source_url):
+        # 2026-10-12：本次修改原因：原货源字段保留，改动链接仍检查格式。
+        if changed("source_url") and self.source_url and not valid_url(self.source_url):
             result.append("货源链接须为有效的 HTTP/HTTPS 链接或留空")
-        if any(sku.spec1 for sku in self.skus) and not self.spec1_name.strip():
+        # if any(sku.spec1 for sku in self.skus) and not self.spec1_name.strip():
+        # 2026-10-12：本次修改原因：原规格名称缺失不阻碍文本修改，结构改动仍检查。
+        if (structure_changed or changed("spec1_name")) and any(sku.spec1 for sku in self.skus) and not self.spec1_name.strip():
             result.append("请填写规格 1 的维度名称")
-        if any(sku.spec2 for sku in self.skus) and not self.spec2_name.strip():
+        # if any(sku.spec2 for sku in self.skus) and not self.spec2_name.strip():
+        # 2026-10-12：本次修改原因：第二规格名称同样按实际结构改动校验。
+        if (structure_changed or changed("spec2_name")) and any(sku.spec2 for sku in self.skus) and not self.spec2_name.strip():
             result.append("请填写规格 2 的维度名称")
-        if self.spec1_name == self.spec2_name and any(sku.spec2 for sku in self.skus):
+        # if self.spec1_name == self.spec2_name and any(sku.spec2 for sku in self.skus):
+        # 2026-10-12：本次修改原因：已有同名规格保留，编辑规格时禁止歧义。
+        if (structure_changed or changed("spec1_name") or changed("spec2_name")) and self.spec1_name == self.spec2_name and any(sku.spec2 for sku in self.skus):
             result.append("两个规格维度不能使用相同名称")
         seen = set()
         for index, sku in enumerate(self.skus, 1):
             prefix = f"SKU {index}："
-            if not positive_decimal(sku.price):
+            # 2026-10-12：本次修改原因：以稳定远端身份逐字段比较，修改 SKU 的价格不能借原占位值绕过审核。
+            previous = original_skus.get(sku.identity)
+            def sku_changed(name: str) -> bool:
+                return previous is None or getattr(sku, name) != getattr(previous, name)
+            # if not positive_decimal(sku.price):
+            # 2026-10-12：本次修改原因：只改商品文本时允许保留原 SKU 空售价，改售价仍须大于零。
+            if (changed("currency") or sku_changed("price") or sku_changed("currency")) and not positive_decimal(sku.price):
                 result.append(prefix + "请填写大于 0 的售价")
-            if sku.currency and sku.currency.upper() != self.currency.upper():
+            # if sku.currency and sku.currency.upper() != self.currency.upper():
+            # 2026-10-12：本次修改原因：只检查改动的商品/SKU 币种一致性。
+            if (changed("currency") or sku_changed("currency")) and sku.currency and sku.currency.upper() != self.currency.upper():
                 result.append(prefix + "币种与商品币种不一致")
             # if sku.image and not valid_url(sku.image):
             # 2026-10-11：本次修改原因：SKU 同样支持本地生成图。
-            if sku.image and not valid_media_url(sku.image):
+            # if sku.image and not valid_media_url(sku.image):
+            # 2026-10-12：本次修改原因：既有规格图片不因文本编辑重新要求修复。
+            if sku_changed("image") and sku.image and not valid_media_url(sku.image):
                 result.append(prefix + "规格图片链接无效")
-            if len(sku.specs) > 2:
+            # if len(sku.specs) > 2:
+            # 2026-10-12：本次修改原因：API 原商品的第三维度保存在远端快照，允许编辑文本；规格重构仍由回传层阻止。
+            if len(sku.specs) > 2 and not self.erp_imported:
                 result.append(prefix + "来源超过两个规格维度，需要先调整规格映射")
-            if len(self.skus) > 1 and not (sku.spec1.strip() or sku.spec2.strip()):
+            # if len(self.skus) > 1 and not (sku.spec1.strip() or sku.spec2.strip()):
+            # 2026-10-12：本次修改原因：只在结构变动时检查前两维，保留只用第三维的远端 SKU。
+            if structure_changed and len(self.skus) > 1 and not (sku.spec1.strip() or sku.spec2.strip()):
                 result.append(prefix + "多规格商品需要规格值")
-            key = (sku.spec1.strip(), sku.spec2.strip())
+            # key = (sku.spec1.strip(), sku.spec2.strip())
+            # 2026-10-12：本次修改原因：API 三维规格不能因前两维相同被误判为重复；使用导入时验证的完整远端键。
+            key = self.erp_sku_links.get(sku.identity, "") if self.erp_imported else (sku.spec1.strip(), sku.spec2.strip())
             if key in seen:
                 result.append(prefix + "规格组合重复")
             seen.add(key)
-            if sku.stock and (not sku.stock.isdecimal() or int(sku.stock) < 0):
+            # if sku.stock and (not sku.stock.isdecimal() or int(sku.stock) < 0):
+            # 2026-10-12：本次修改原因：原库存保持原值，改动库存仍要求非负整数。
+            if sku_changed("stock") and sku.stock and (not sku.stock.isdecimal() or int(sku.stock) < 0):
                 result.append(prefix + "库存须为非负整数或留空")
-            if sku.weight and not positive_decimal(sku.weight):
+            # if sku.weight and not positive_decimal(sku.weight):
+            # 2026-10-12：本次修改原因：原 SKU 的 0 重量占位保留，改动重量仍检查。
+            if sku_changed("weight") and sku.weight and not positive_decimal(sku.weight):
                 result.append(prefix + "重量须为大于 0 的 KG 数值或留空")
-            if sku.dimensions:
+            # if sku.dimensions:
+            # 2026-10-12：本次修改原因：未编辑的 SKU 尺寸占位保留，改动尺寸仍检查。
+            if sku_changed("dimensions") and sku.dimensions:
                 sizes = re.split(r"\s*[xX×*]\s*", sku.dimensions.strip())
                 if len(sizes) != 3 or not all(positive_decimal(size) for size in sizes):
                     result.append(prefix + "尺寸须为长*宽*高，三个数值均大于 0，单位 CM")
         return result
 
+    # 2026-10-12：本次修改原因：API 原商品审核以固定导入基线检查全部本机编辑，不要求补齐未改动的远端默认字段。
+    # def review_issues(self) -> list[str]:
+    # 2026-10-12：本次修改原因：未保存的编辑可提供原表单值，正确检查主动改动后的图文输出。
+    def review_issues(self, form_original: Product | None = None) -> list[str]:
+        baseline = self.erp_import_baseline if self.erp_imported else {}
+        # return self.issues(Product.from_dict(baseline) if baseline else None)
+        # 2026-10-12：本次修改原因：审核、速览与旧商品状态纳入全部长度/数量/格式限制，16 张主图即使未编辑也显示待完善。
+        from .miaoshou_mapping import draft_limit_issues
+        original = Product.from_dict(baseline) if baseline else None
+        # return list(dict.fromkeys(self.issues(original) + draft_limit_issues(self, original)))
+        # 2026-10-12：本次修改原因：完整性基于固定导入基线，图文限额基于当前编辑前的数据；两者不混用。
+        return list(dict.fromkeys(self.issues(original) + draft_limit_issues(self, form_original or original)))
+
     @property
     def status(self) -> str:
-        if self.issues():
+        # if self.issues():
+        # 2026-10-12：本次修改原因：商品库审核状态与增量审核规则一致，完整表格导出仍另做检查。
+        if self.review_issues():
             return "待完善"
         return "已审核" if self.approved else "待审核"
 

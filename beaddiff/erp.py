@@ -98,7 +98,9 @@ class ERPService:
         result = []
         if not product.approved:
             result.append("请先保存并审核商品。")
-        result.extend(product.issues())
+        # result.extend(product.issues())
+        # 2026-10-12：本次修改原因：API 更新只校验实际改动字段，新增商品仍需完整检查，避免原物流占位阻挡标题写回。
+        result.extend(product.review_issues() if mode == "update" else product.issues())
         if mode == "update" and not product.erp_original_id:
             result.append("尚未关联妙手中的原采集商品；来源平台商品 ID 不能作为妙手商品 ID。")
         media = product.images + product.detail_images + [sku.image for sku in product.skus]

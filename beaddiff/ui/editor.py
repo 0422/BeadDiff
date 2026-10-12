@@ -33,6 +33,10 @@ from ..ai.service import AIService
 from ..assets import valid_media_url
 from .ai_runner import TaskHub
 from .ai_workspace import AIWorkspace
+# 2026-10-12：本次修改原因：共用字段限制和表单差异保护，标题/AI 文案修改不连带改写原始详情及 SKU 元数据。
+# from ..miaoshou_mapping import draft_limit_issues, preserve_unedited_form
+# 2026-10-12：本次修改原因：主图实时数量和审核反馈使用相同上限，格式校验统一交给保存/审核服务。
+from ..miaoshou_mapping import MAX_MAIN_IMAGES, MAX_SPEC_IMAGES, preserve_unedited_form
 
 
 def text_editor(text: str = "", placeholder: str = "", height: int = 100) -> QPlainTextEdit:
@@ -61,6 +65,9 @@ class ProductEditor(QDialog):
         root.setSpacing(16)
         root.addWidget(label("商品编辑", "pageTitle"))
         root.addWidget(label(f"{product.source.upper()} · {product.source_id} · {product.site or '站点未提供'}    /    当前版本 v{product.revision}", "muted"))
+        # 2026-10-12：本次修改原因：显示 API 来源及人民币单位，帮助用户区分旧插件自解析商品。
+        if product.erp_imported:
+            root.addWidget(label(f"妙手 API 导入 · 原商品 ID {product.erp_original_id} · 金额单位 CNY · 未编辑的远端字段完整保留", "hint", True))
         self.tabs = QTabWidget()
         root.addWidget(self.tabs, 1)
         self.fields: dict[str, QLineEdit] = {}
@@ -99,7 +106,10 @@ class ProductEditor(QDialog):
         self.dirty = False
         # 2026-10-11：本次修改原因：记录表单初始显示内容，避免描述回退和 SKU 币种规范化把直接保存误判为人工修改。
         try:
-            self.initial_form_content = self.collect().business_content()
+            # self.initial_form_content = self.collect().business_content()
+            # 2026-10-12：本次修改原因：保留首屏规范化表单快照，后续只应用用户实际改变的单字段。
+            self.initial_form_product = self.collect()
+            self.initial_form_content = self.initial_form_product.business_content()
         except ValueError:
             self.initial_form_content = None
 
@@ -134,6 +144,8 @@ class ProductEditor(QDialog):
         # form.addRow("产品标题 *", self._field("title", "填写面向销售渠道的产品标题"))
         # 2026-10-11：本次修改原因：标题栏右侧提供妙手式 AI 按钮。
         self.ai_field(form, "产品标题 *", self._field("title", "填写面向销售渠道的产品标题"), "title")
+        # 2026-10-12：本次修改原因：编辑时就显示公共采集箱文本上限，AI 输出保存前使用同样校验。
+        form.addRow("", label("公共采集箱：标题最多 255 字符，简述最多 65536 字符，详细描述 HTML 最多 100000 字符。", "hint", True))
         form.addRow("产品主编号 *", self._field("main_code", "同一商品的 SKU 共用一个产品主编号"))
         simple = self.product.simple_description
         if not simple and "simple_description" not in self.product.manual_fields:
@@ -202,9 +214,14 @@ class ProductEditor(QDialog):
             name, value = parts
             if not name and not value:
                 continue
-            if not name or not value:
+            # if not name or not value:
+            # 2026-10-12：本次修改原因：ERP 原有空属性可随无关字段编辑保留，不强迫补写远端未要求的数据。
+            original_value = self.product.erp_imported and name in self.product.attributes and self.product.attributes[name] == value
+            if not name or not value and not original_value:
                 raise ValueError(f"属性第 {row + 1} 行需要同时填写名称和值。")
-            if name in result or any(character in name + value for character in "；\n\r"):
+            # if name in result or any(character in name + value for character in "；\n\r"):
+            # 2026-10-12：本次修改原因：API 原属性的分号/换行保持原值，手动新输入仍按原编辑规则校验。
+            if name in result or not original_value and any(character in name + value for character in "；\n\r"):
                 raise ValueError("属性名不能重复，属性中不能含分隔符“；”或换行。")
             result[name] = value
         return result
@@ -225,7 +242,9 @@ class ProductEditor(QDialog):
         # self.images = MediaList(self.product.images, self.product.image_sizes)
         # 2026-10-11：本次修改原因：商品图片支持本地上传和单图 AI，套图仍保持可排序图片组。
         assets = self.ai_service.assets if self.ai_service else None
-        self.images = MediaList(self.product.images, self.product.image_sizes, assets, enable_ai=True)
+        # self.images = MediaList(self.product.images, self.product.image_sizes, assets, enable_ai=True)
+        # 2026-10-12：本次修改原因：原有超限列表打开即显示 16 / 15，手动粘贴、上传和 AI 套图后实时更新。
+        self.images = MediaList(self.product.images, self.product.image_sizes, assets, enable_ai=True, maximum=MAX_MAIN_IMAGES)
         self.images.aiRequested.connect(lambda address: self.open_ai("image", "images", address))
         self.product_gallery = ImageGallery(self.network)
         self.product_gallery.enable_ai = True
@@ -234,7 +253,9 @@ class ProductEditor(QDialog):
         self.product_gallery.sizeLoaded.connect(self.images.update_size)
         form.addRow("产品图片 *", self.images)
         form.addRow("", button("AI 生成套图", lambda: self.open_ai("image_set", "images")))
-        form.addRow("", label("第一张为主图，可上移/下移调整顺序；像素尺寸仅显示采集材料的明确值。", "hint", True))
+        # form.addRow("", label("第一张为主图，可上移/下移调整顺序；像素尺寸仅显示采集材料的明确值。", "hint", True))
+        # 2026-10-12：本次修改原因：明确整个产品图片列表最多 15 张，不只第一张主图受限，不自动删图。
+        form.addRow("", label(f"产品图片最多 {MAX_MAIN_IMAGES} 张，第一张为主图，可上移/下移排序；超限须先移除或调整图片用途才能保存。", "hint", True))
         form.addRow("", self.product_gallery)
         self.sku_group_dimension = QComboBox()
         self.sku_group_dimension.addItems([self.fields["spec1_name"].text(), self.fields["spec2_name"].text()])
@@ -331,7 +352,15 @@ class ProductEditor(QDialog):
         group = self.sku_group.currentText()
         urls = self.sku_groups.get(group, [])
         self.sku_group_gallery.set_urls(urls)
-        self.sku_group_count.setText(f"共 {len(self.sku_groups)} 组 · 当前组 {len(urls)} 张独立图片")
+        # self.sku_group_count.setText(f"共 {len(self.sku_groups)} 组 · 当前组 {len(urls)} 张独立图片")
+        # 2026-10-12：本次修改原因：规格1共享图片组也显示上限；按第二规格预览时不错误套用规格1上限。
+        capped = self.sku_group_dimension.currentIndex() == 0
+        count_text = f"共 {len(self.sku_groups)} 组 · 当前组 {len(urls)} 张独立图片"
+        if capped:
+            count_text += f" / 最多 {MAX_SPEC_IMAGES} 张"
+            if len(urls) > MAX_SPEC_IMAGES:
+                count_text += f" · 超出 {len(urls) - MAX_SPEC_IMAGES} 张，保存前请调整"
+        self.sku_group_count.setText(count_text)
         column = 1 if self.sku_group_dimension.currentIndex() == 0 else 2
         self.sku_group_table.blockSignals(True)
         self.sku_group_table.setRowCount(0)
@@ -390,7 +419,9 @@ class ProductEditor(QDialog):
         form.addRow("货源备注", self._field("source_remark", "采购或货源说明"))
         # 2026-10-11：本次修改原因：公开采集箱单规格新增要求货源价，提供独立输入以免与销售金额混淆。
         form.addRow("回传货源价", self._field("supply_price", "数值金额，币种使用基本信息中的商品币种"))
-        form.addRow("", label("单规格新增必须有货源价。优先使用这里的金额，否则读取已确认币种的采集货源价；销售金额不会代填货源价。", "hint", True))
+        # form.addRow("", label("单规格新增必须有货源价。优先使用这里的金额，否则读取已确认币种的采集货源价；销售金额不会代填货源价。", "hint", True))
+        # 2026-10-12：本次修改原因：多 SKU 新增也必须有独立商品价，API 导入则已读取妙手的货源价。
+        form.addRow("", label("新增商品必须有独立货源价，单规格可读取币种明确的采集货源价。SKU 销售金额不会代填；API 导入的货源价为人民币。", "hint", True))
         form.addRow("", label("货源备注在本地保存，现有 22 列模板没有对应列。", "hint", True))
 
     def open_attachment(self, key: str) -> None:
@@ -543,6 +574,11 @@ class ProductEditor(QDialog):
         self.sku_table.itemChanged.connect(self.sku_item_changed)
         self.confirm_mapping = QCheckBox("已人工核对：将超过两个维度的来源规格明确合并到上面两列；原始材料仍保留")
         self.confirm_mapping.setVisible(any(len(sku.specs) > 2 for sku in self.product.skus))
+        # 2026-10-12：本次修改原因：ERP 三维规格不允许在两列编辑器中合并，避免误以为可重构远端 SKU。
+        if self.product.erp_imported:
+            self.confirm_mapping.setVisible(False)
+            if any(len(sku.specs) > 2 for sku in self.product.skus):
+                layout.addWidget(label("妙手第三规格完整保留；本页只展示前两列，三维 SKU 的修改请在妙手完成。", "hint", True))
         layout.addWidget(self.confirm_mapping)
         layout.addWidget(label("尺寸建议按“长*宽*高”填写，单位 CM。横向滚动可编辑规格图片链接。", "hint"))
         # self.tabs.addTab(page, f"规格与定价（{len(self.product.skus)}）")
@@ -677,11 +713,24 @@ class ProductEditor(QDialog):
                                     source_currency=values[10], stock=values[5], source_stock=values[11],
                                     purchase_limit=values[12], weight=values[6], dimensions=values[7], image=values[8], specs=specs,
                                     availability=metadata.get("availability", "")))
+        # return product
+        # 2026-10-12：本次修改原因：保存任一字段时，未编辑的富文本、空值和规格元数据保持打开编辑器前的原值。
+        if hasattr(self, "initial_form_product"):
+            product = preserve_unedited_form(self.product, self.initial_form_product, product)
         return product
 
     def check(self) -> None:
         try:
-            issues = self.collect().issues()
+            # issues = self.collect().issues()
+            # 2026-10-12：本次修改原因：完整性检查同时显示妙手字数与图片数量限制，修改与 AI 共用结果。
+            product = self.collect()
+            # issues = product.issues() + draft_limit_issues(product)
+            # 2026-10-12：本次修改原因：API 编辑完整性反馈与保存审核共用增量规则，保留未编辑的远端物流默认值。
+            # issues = product.review_issues() + draft_limit_issues(product)
+            # 2026-10-12：本次修改原因：完整性检查直接复用统一审核问题清单，避免格式限制重复提示。
+            # issues = product.review_issues()
+            # 2026-10-12：本次修改原因：手动或 AI 尚未保存的 HTML 以当前表单为准进行限制校验。
+            issues = product.review_issues(self.product)
             if issues:
                 QMessageBox.warning(self, "商品尚需完善", "\n".join(f"• {issue}" for issue in issues[:30]))
             else:

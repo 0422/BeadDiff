@@ -9,7 +9,9 @@ from PySide6.QtWidgets import QDialog, QFileDialog, QHBoxLayout, QHeaderView, QM
 
 from ..assets import AssetStore
 
-from .widgets import button
+# from .widgets import button
+# 2026-10-12：本次修改原因：图片列表实时展示当前张数及超限提醒。
+from .widgets import button, label
 
 
 class MediaList(QWidget):
@@ -19,12 +21,17 @@ class MediaList(QWidget):
 
     # def __init__(self, urls: list[str], sizes: dict[str, str]):
     # 2026-10-11：本次修改原因：同一图片列表支持商品素材和爆款参考素材上传。
-    def __init__(self, urls: list[str], sizes: dict[str, str], assets: AssetStore | None = None, enable_ai: bool = False):
+    # def __init__(self, urls: list[str], sizes: dict[str, str], assets: AssetStore | None = None, enable_ai: bool = False):
+    # 2026-10-12：本次修改原因：可选上限仅用于主图等有明确数量规则的列表，详情图和爆款参考图不强加主图限制。
+    def __init__(self, urls: list[str], sizes: dict[str, str], assets: AssetStore | None = None, enable_ai: bool = False,
+                 maximum: int | None = None):
         super().__init__()
         # self.sizes = sizes
         # 2026-10-11：本次修改原因：预览取得的尺寸仅更新编辑副本，取消编辑不改原商品。
         self.sizes = dict(sizes)
         self.assets = assets
+        # 2026-10-12：本次修改原因：保留采集到的完整列表，只提示上限，不静默裁剪图片。
+        self.maximum = maximum
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         self.table = QTableWidget(0, 2)
@@ -49,6 +56,10 @@ class MediaList(QWidget):
         actions.addWidget(button("下移", lambda: self.move(1)))
         actions.addStretch()
         layout.addLayout(actions)
+        # 2026-10-12：本次修改原因：打开编辑器即检查已有超限图片，新增、移除、AI 应用后跟随刷新。
+        self.count_hint = label("", "hint", True)
+        layout.addWidget(self.count_hint)
+        self.textChanged.connect(self.update_count)
         self.set_urls(urls)
         self.table.itemChanged.connect(self.item_changed)
 
@@ -67,6 +78,22 @@ class MediaList(QWidget):
             size.setFlags(size.flags() & ~Qt.ItemFlag.ItemIsEditable)
             self.table.setItem(row, 1, size)
         self.table.blockSignals(False)
+        # 2026-10-12：本次修改原因：程序化设置和 AI 套图替换同样即时刷新数量，且不把初始化当作人工改动。
+        self.update_count()
+
+    # 2026-10-12：本次修改原因：按最终保存时的去重规则计数，超限显示差额而不自动删图。
+    def update_count(self) -> None:
+        count = len(set(self.toPlainText().splitlines()))
+        text = f"共 {count} 张图片"
+        over_limit = self.maximum is not None and count > self.maximum
+        if self.maximum is not None:
+            text = f"{count} / {self.maximum} 张图片"
+            if over_limit:
+                text += f" · 超出 {count - self.maximum} 张，请移除或调整用途后保存"
+        self.count_hint.setText(text)
+        self.count_hint.setObjectName("warning" if over_limit else "hint")
+        self.count_hint.style().unpolish(self.count_hint)
+        self.count_hint.style().polish(self.count_hint)
 
     def item_changed(self, item: QTableWidgetItem) -> None:
         if item.column() == 0:
