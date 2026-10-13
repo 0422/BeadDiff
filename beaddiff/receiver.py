@@ -19,6 +19,10 @@ class LocalReceiver:
         self.error = ""
 
     def start(self) -> bool:
+        # 2026-10-12：本次修改原因：切换路线时防止重复绑定端口。
+        if self.server is not None:
+            return True
+        self.error = ""
         receiver = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -62,6 +66,10 @@ class LocalReceiver:
                     self.reply(404, {"error": "接口不存在"})
 
             def do_POST(self) -> None:
+                # 2026-10-12：本次修改原因：切换路线后未处理的扩展请求明确提示暂停。
+                if receiver.settings.capture_route != "plugin":
+                    self.reply(503, {"error": "插件同步已暂停，请在设置 → 采集路线启用插件同步。"})
+                    return
                 if self.path != "/api/v1/captures":
                     self.reply(404, {"error": "接口不存在"})
                     return
@@ -108,3 +116,5 @@ class LocalReceiver:
         if self.server:
             self.server.shutdown()
             self.server.server_close()
+            # 2026-10-12：本次修改原因：释放运行状态，允许重新切回插件路线。
+            self.server = None

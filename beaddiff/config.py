@@ -18,6 +18,8 @@ class Settings:
     port: int = 18765
     # 2026-10-11：本次修改原因：持久化回传方式，默认新增草稿以保留妙手中的原采集商品。
     erp_transfer_mode: str = "create"
+    # 2026-10-12：本次修改原因：默认从妙手接口取数，插件本机同步作为可切换的备用路线。
+    capture_route: str = "miaoshou"
 
     @classmethod
     def load(cls) -> Settings:
@@ -35,7 +37,12 @@ class Settings:
             mode = content.get("erp_transfer_mode", "create")
             if mode not in {"create", "update"}:
                 raise ValueError("settings.json 中的 ERP 回传方式无效，应为 create 或 update。")
-            return cls(data_dir, token, port, mode)
+            # return cls(data_dir, token, port, mode)
+            # 2026-10-12：本次修改原因：兼容旧配置，保存并校验用户选择的获取方式。
+            route = content.get("capture_route", "miaoshou")
+            if route not in {"miaoshou", "plugin"}:
+                raise ValueError("settings.json 中的采集路线无效，应为 miaoshou 或 plugin。")
+            return cls(data_dir, token, port, mode, route)
         result = cls(data_dir, secrets.token_urlsafe(32))
         result.save()
         return result
@@ -48,7 +55,12 @@ class Settings:
         if self.erp_transfer_mode not in {"create", "update"}:
             raise ValueError("ERP 回传方式无效。")
         content = json.loads(target.read_text(encoding="utf-8")) if target.exists() else {}
-        content.update(port=self.port, token=self.token, erp_transfer_mode=self.erp_transfer_mode)
+        # content.update(port=self.port, token=self.token, erp_transfer_mode=self.erp_transfer_mode)
+        # 2026-10-12：本次修改原因：保存任一设置均保留采集路线。
+        if self.capture_route not in {"miaoshou", "plugin"}:
+            raise ValueError("采集路线无效。")
+        content.update(port=self.port, token=self.token, erp_transfer_mode=self.erp_transfer_mode,
+                       capture_route=self.capture_route)
         temporary.write_text(json.dumps(content, ensure_ascii=False, indent=2), encoding="utf-8")
         temporary.replace(target)
 

@@ -1,6 +1,8 @@
 # 2026-10-12：本次修改原因：离线覆盖 API 导入完整字段留存、账号去重、CNY 金额、增量更新和新增副本，不调用真实 ERP。
 from copy import deepcopy
 import json
+# 2026-10-12：本次修改原因：离线验证有限并发确实同时读取，并检查逐条真实进度及归档去重。
+from threading import Barrier, Lock
 
 import httpx
 import pytest
@@ -94,10 +96,73 @@ def test_partial_import_returns_success_and_failure_and_only_reads_api(tmp_path)
             return httpx.Response(200, json={"result": "fail", "code": "fail", "message": "无权限"})
         return success(detail(target))
     importer = service(tmp_path, handler)
-    result = importer.import_products(importer.adapter.client(), ["123", "456", "123"])
+    # result = importer.import_products(importer.adapter.client(), ["123", "456", "123"])
+    # 2026-10-12：本次修改原因：原用例核查持久日志顺序，指定串行；并发由独立用例核验。
+    result = importer.import_products(importer.adapter.client(), ["123", "456", "123"], workers=1)
     assert [row["state"] for row in result["results"]] == ["imported", "failed"]
     assert len(importer.repository.products()) == 1 and calls == [DETAIL_PATH, DETAIL_PATH]
     assert importer.import_products(importer.adapter.client(), ["123"])["results"][0]["state"] == "existing"
+    # 2026-10-12：本次修改原因：成功、失败和重复导入均持久留档，重启后仍可按账号及详情核查。
+    records = Repository(tmp_path).miaoshou_import_records()
+    assert [row["state"] for row in records] == ["existing", "failed", "imported"]
+    assert all(row["account_id"] == config().account_id for row in records)
+    assert records[1]["target_id"] == "456" and "无权限" in records[1]["message"]
+    assert json.loads(records[2]["detail"])["editCommonCollectBoxDetail"]["title"] == "ERP 标题"
+    assert records[0]["batch_id"] != records[2]["batch_id"]
+
+
+# 2026-10-12：本次修改原因：重复同步、清理日志及商品回收不能导致重新请求详情或覆盖加工。
+def test_repeat_sync_skips_network_even_after_local_cleanup(tmp_path):
+    calls = []
+    def handler(request):
+        calls.append(request.url.path)
+        return success(detail())
+    importer = service(tmp_path, handler)
+    first = importer.import_products(importer.adapter.client(), ["123"])
+    product_id = first["results"][0]["product_id"]
+    item = importer.repository.product(product_id)
+    item.title = "保留加工标题"
+    importer.repository.save_product(item)
+    logs = importer.repository.miaoshou_import_records()
+    importer.repository.hide_local_items("imports", [row["id"] for row in logs])
+    repeated = importer.import_products(importer.adapter.client(), ["123", "123"])
+    assert repeated["existing"] == 1 and calls == [DETAIL_PATH]
+    assert importer.repository.product(product_id).title == "保留加工标题"
+    importer.repository.hide_local_items("products", [product_id])
+    archived = importer.import_products(importer.adapter.client(), ["123"])
+    assert archived["results"][0]["state"] == "existing"
+    assert not archived["results"][0]["product_id"] and calls == [DETAIL_PATH]
+    index = Repository(tmp_path).miaoshou_import_index(config().account_id)
+    assert index["123"]["archived"] and index["123"]["imported_at"]
+    assert index["123"]["last_sync_at"] >= index["123"]["imported_at"]
+    assert not Repository(tmp_path).miaoshou_import_index("another-account")
+
+
+# 2026-10-12：本次修改原因：同步最多三个并发只读请求，每条完成后进度累计，返回结果仍按用户选择顺序。
+def test_parallel_sync_reports_real_counts_in_selection_order(tmp_path):
+    barrier, lock = Barrier(3), Lock()
+    active = peak = 0
+    def handler(request):
+        nonlocal active, peak
+        assert request.url.path == DETAIL_PATH
+        with lock:
+            active += 1
+            peak = max(peak, active)
+        try:
+            barrier.wait(timeout=5)
+            target = json.loads(request.content)["commonCollectBoxDetailId"]
+            return success(detail(target))
+        finally:
+            with lock:
+                active -= 1
+    importer = service(tmp_path, handler)
+    progress = []
+    result = importer.import_products(importer.adapter.client(), ["125", "123", "124"], progress.append)
+    assert peak == 3 and result["imported"] == 3
+    assert [row["target_id"] for row in result["results"]] == ["125", "123", "124"]
+    assert [item["completed"] for item in progress] == [0, 1, 2, 3, 3]
+    assert all(item["completed"] == item["imported"] + item["existing"] + item["failed"] for item in progress)
+    assert len(Repository(tmp_path).products()) == 3
 
 
 def test_api_update_fetches_fresh_detail_preserves_untouched_fields_and_does_not_upload(tmp_path):

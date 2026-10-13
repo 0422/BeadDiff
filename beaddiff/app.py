@@ -47,7 +47,10 @@ def main() -> int:
         receiver = LocalReceiver(settings, service, bridge.capture_received.emit)
         window = MainWindow(settings, repository, service, receiver)
         bridge.capture_received.connect(window.schedule_refresh)
-        receiver.start()
+        # receiver.start()
+        # 2026-10-12：本次修改原因：接口路线不监听本机端口，插件路线才启用接收。
+        if settings.capture_route == "plugin":
+            receiver.start()
         window.update_connection()
         application.aboutToQuit.connect(receiver.stop)
         window.show()

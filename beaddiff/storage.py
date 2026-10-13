@@ -42,11 +42,6 @@ class Repository:
                     body TEXT NOT NULL, created_at TEXT NOT NULL,
                     PRIMARY KEY(product_id, revision)
                 );
-                CREATE TABLE IF NOT EXISTS exports (
-                    id TEXT PRIMARY KEY, created_at TEXT NOT NULL, path TEXT NOT NULL,
-                    product_count INTEGER NOT NULL, sku_count INTEGER NOT NULL,
-                    versions TEXT NOT NULL
-                );
             """)
             # 2026-10-11：本次修改原因：回传记录保存操作方式和确切内容快照；数据库升级不改原商品或原始材料。
             connection.executescript("""
@@ -58,6 +53,26 @@ class Repository:
                     created_at TEXT NOT NULL, updated_at TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS erp_transfers_product ON erp_transfers(product_id, created_at);
+            """)
+            # 2026-10-12：本次修改原因：接口同步逐商品留档，成功、重复及失败可从采集记录追溯。
+            connection.executescript("""
+                CREATE TABLE IF NOT EXISTS miaoshou_import_records (
+                    id TEXT PRIMARY KEY, batch_id TEXT NOT NULL, account_id TEXT NOT NULL,
+                    target_id TEXT NOT NULL, product_id TEXT NOT NULL DEFAULT '',
+                    title TEXT NOT NULL DEFAULT '', state TEXT NOT NULL, message TEXT NOT NULL,
+                    detail TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS miaoshou_import_records_time
+                    ON miaoshou_import_records(created_at);
+            """)
+            # 2026-10-12：本次修改原因：本机列表可清理并恢复，保留去重身份、原始材料及回传证据。
+            connection.executescript("""
+                CREATE TABLE IF NOT EXISTS local_hidden (
+                    kind TEXT NOT NULL, item_id TEXT NOT NULL, hidden_at TEXT NOT NULL,
+                    PRIMARY KEY(kind, item_id)
+                );
+                CREATE INDEX IF NOT EXISTS miaoshou_import_identity
+                    ON miaoshou_import_records(account_id, target_id, created_at);
             """)
             # 2026-10-11：本次修改原因：进程中断时不能把正在发送当成失败后自动重试，以免新增重复商品。
             connection.execute(
@@ -107,7 +122,164 @@ class Repository:
 
     def captures(self) -> list[dict]:
         with self.connection() as connection:
-            return [dict(row) for row in connection.execute("SELECT * FROM captures ORDER BY received_at DESC, rowid DESC")]
+            # return [dict(row) for row in connection.execute("SELECT * FROM captures ORDER BY received_at DESC, rowid DESC")]
+            # 2026-10-12：本次修改原因：清空采集列表仅隐藏本机记录，插件重试仍按原事件去重。
+            return [dict(row) for row in connection.execute("""SELECT c.* FROM captures c
+                WHERE NOT EXISTS (SELECT 1 FROM local_hidden h WHERE h.kind='captures' AND h.item_id=c.id)
+                ORDER BY received_at DESC, rowid DESC""")]
+
+    # 2026-10-12：本次修改原因：同步结果与插件材料分开存储，不把接口 JSON 交给网页解析器。
+    def record_miaoshou_import(self, batch_id: str, account_id: str, result: dict, detail: dict) -> None:
+        with self.connection() as connection:
+            connection.execute("INSERT INTO miaoshou_import_records VALUES (?,?,?,?,?,?,?,?,?,?)", (
+                uuid.uuid4().hex, batch_id, account_id, result["target_id"], result.get("product_id", ""),
+                result.get("title", ""), result["state"], result.get("message", ""),
+                json.dumps(detail, ensure_ascii=False), now_iso(),
+            ))
+
+    # 2026-10-12：本次修改原因：隐藏记录仍参与旧版快照判断，清理后不重新冒出相同历史。
+    def miaoshou_import_records(self, include_hidden: bool = False) -> list[dict]:
+        with self.connection() as connection:
+            # return [dict(row) for row in connection.execute(
+            #     "SELECT * FROM miaoshou_import_records ORDER BY created_at DESC, rowid DESC")]
+            # 2026-10-12：本次修改原因：同步记录可单独清理，商品及历史同步时间仍保留。
+            return [dict(row) for row in connection.execute("""SELECT r.* FROM miaoshou_import_records r
+                WHERE ? OR NOT EXISTS (SELECT 1 FROM local_hidden h WHERE h.kind='imports' AND h.item_id=r.id)
+                ORDER BY created_at DESC, rowid DESC""", (include_hidden,))]
+
+    # 2026-10-12：本次修改原因：回传状态继续读取全部证据，记录页面独立过滤已清理条目。
+    def hidden_local_ids(self, kind: str) -> set[str]:
+        with self.connection() as connection:
+            return {row[0] for row in connection.execute("SELECT item_id FROM local_hidden WHERE kind=?", (kind,))}
+
+    # 2026-10-12：本次修改原因：一次读取账号级导入索引，重复同步不再逐条请求详情；时间只辅助展示。
+    def miaoshou_import_index(self, account_id: str) -> dict[str, dict]:
+        with self.connection() as connection:
+            rows = connection.execute("""SELECT p.source_id, p.id, p.body,
+                EXISTS(SELECT 1 FROM local_hidden h WHERE h.kind='products' AND h.item_id=p.id) AS archived
+                FROM products p WHERE p.source='miaoshou-api' AND p.site=?""", (account_id,))
+            result = {}
+            for row in rows:
+                product = Product.from_dict(json.loads(row["body"]))
+                result[row["source_id"]] = {"product_id": row["id"], "title": product.title,
+                    "imported_at": product.erp_imported_at or product.created_at,
+                    "last_sync_at": product.erp_imported_at or product.created_at, "archived": bool(row["archived"])}
+            for row in connection.execute("""SELECT target_id, MAX(created_at) AS last_sync_at
+                FROM miaoshou_import_records WHERE account_id=? AND state IN ('imported','existing')
+                GROUP BY target_id""", (account_id,)):
+                if row["target_id"] in result:
+                    result[row["target_id"]]["last_sync_at"] = row["last_sync_at"]
+            return result
+
+    # 2026-10-12：本次修改原因：统一可恢复的本机清理，未确认回传及正在解析材料不可移除。
+    def hide_local_items(self, kind: str, item_ids: list[str]) -> dict:
+        tables = {"products": "products", "captures": "captures", "imports": "miaoshou_import_records", "transfers": "erp_transfers"}
+        if kind not in tables:
+            raise ValueError("不支持清理此类记录。")
+        changed, blocked = 0, 0
+        with self.connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            for item_id in dict.fromkeys(item_ids):
+                # 2026-10-12：本次修改原因：旧版无同步任务的导入快照也可清理，隐藏标记仍可恢复。
+                if kind == "imports" and item_id.startswith("legacy:"):
+                    if connection.execute("SELECT 1 FROM products WHERE id=?", (item_id.removeprefix("legacy:"),)).fetchone():
+                        changed += connection.execute("INSERT OR IGNORE INTO local_hidden VALUES (?,?,?)", (kind, item_id, now_iso())).rowcount
+                    continue
+                row = connection.execute(f"SELECT * FROM {tables[kind]} WHERE id=?", (item_id,)).fetchone()
+                if not row:
+                    continue
+                unsafe = kind == "transfers" and row["state"] in {"sending", "unknown"}
+                if kind == "products":
+                    unsafe = bool(connection.execute("SELECT 1 FROM erp_transfers WHERE product_id=? AND state IN ('sending','unknown')", (item_id,)).fetchone())
+                if kind == "captures":
+                    unsafe = row["state"] in {"已接收", "解析中"}
+                if unsafe:
+                    blocked += 1
+                    continue
+                changed += connection.execute("INSERT OR IGNORE INTO local_hidden VALUES (?,?,?)", (kind, item_id, now_iso())).rowcount
+        return {"hidden": changed, "blocked": blocked}
+
+    # 2026-10-12：本次修改原因：清理操作可恢复，恢复不会请求或修改妙手远端数据。
+    # def restore_local_items(self, kind: str) -> int:
+    # 2026-10-13：本次修改原因：回收站允许勾选恢复，不再只能恢复同类全部条目。
+    def restore_local_items(self, kind: str, item_ids: list[str] | None = None) -> int:
+        if kind not in {"products", "captures", "imports", "transfers"}:
+            raise ValueError("不支持恢复此类记录。")
+        with self.connection() as connection:
+            # return connection.execute("DELETE FROM local_hidden WHERE kind=?", (kind,)).rowcount
+            if item_ids is None:
+                return connection.execute("DELETE FROM local_hidden WHERE kind=?", (kind,)).rowcount
+            return sum(connection.execute("DELETE FROM local_hidden WHERE kind=? AND item_id=?", (kind, item_id)).rowcount
+                       for item_id in dict.fromkeys(item_ids))
+
+    # 2026-10-13：本次修改原因：提供可浏览的回收站列表，关联标题、来源和删除时间；只返回已移除数据。
+    def recycle_items(self, kind: str) -> list[dict]:
+        tables = {"products": "products", "captures": "captures", "imports": "miaoshou_import_records", "transfers": "erp_transfers"}
+        if kind not in tables:
+            raise ValueError("回收站类型无效。")
+        result = []
+        with self.connection() as connection:
+            for hidden in connection.execute("SELECT * FROM local_hidden WHERE kind=? ORDER BY hidden_at DESC, rowid DESC", (kind,)):
+                item_id = hidden["item_id"]
+                legacy = kind == "imports" and item_id.startswith("legacy:")
+                row = connection.execute(f"SELECT * FROM {'products' if legacy else tables[kind]} WHERE id=?",
+                                         (item_id.removeprefix("legacy:") if legacy else item_id,)).fetchone()
+                if row is None:
+                    continue
+                record = dict(row)
+                product_row = row if kind == "products" or legacy else connection.execute(
+                    "SELECT body FROM products WHERE id=?", (record.get("product_id", ""),)).fetchone()
+                data = json.loads(product_row["body"]) if product_row else json.loads(record.get("snapshot", "{}"))
+                title = data.get("title") or record.get("title") or "未获取标题"
+                source = data.get("source") or record.get("source") or "—"
+                identity = data.get("main_code") or record.get("target_id") or record.get("source_id") or item_id
+                state = Product.from_dict(data).status if kind == "products" or legacy else record.get("state", "")
+                result.append({"id": item_id, "hidden_at": hidden["hidden_at"], "title": title,
+                    "identity": identity, "source": source, "state": state, "message": record.get("message", ""),
+                    "product_id": item_id if kind == "products" else record.get("product_id", "")})
+        return result
+
+    # 2026-10-13：本次修改原因：明确回收站永久删除/清空语义；只删除已移除条目，未核对回执始终受保护。
+    def purge_local_items(self, kind: str, item_ids: list[str]) -> dict:
+        tables = {"products": "products", "captures": "captures", "imports": "miaoshou_import_records", "transfers": "erp_transfers"}
+        if kind not in tables:
+            raise ValueError("回收站类型无效。")
+        deleted, blocked = 0, 0
+        with self.connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            for item_id in dict.fromkeys(item_ids):
+                if not connection.execute("SELECT 1 FROM local_hidden WHERE kind=? AND item_id=?", (kind, item_id)).fetchone():
+                    continue
+                # 首次导入快照仍属于商品元数据；清空其记录入口时永久隐藏该旧版回退项。
+                if kind == "imports" and item_id.startswith("legacy:"):
+                    # connection.execute("UPDATE local_hidden SET kind='purged-import' WHERE kind=? AND item_id=?", (kind, item_id))
+                    # 2026-10-13：本次修改原因：旧版记录已有永久隐藏标记时也能清空，避免唯一键冲突。
+                    connection.execute("INSERT OR IGNORE INTO local_hidden VALUES ('purged-import',?,?)", (item_id, now_iso()))
+                    connection.execute("DELETE FROM local_hidden WHERE kind=? AND item_id=?", (kind, item_id))
+                    deleted += 1
+                    continue
+                row = connection.execute(f"SELECT * FROM {tables[kind]} WHERE id=?", (item_id,)).fetchone()
+                unsafe = bool(row and kind == "transfers" and row["state"] in {"sending", "unknown"})
+                if row and kind == "products":
+                    unsafe = bool(connection.execute("SELECT 1 FROM erp_transfers WHERE product_id=? AND state IN ('sending','unknown')", (item_id,)).fetchone())
+                if row and kind == "captures":
+                    unsafe = row["state"] in {"已接收", "解析中"}
+                if unsafe:
+                    blocked += 1
+                    continue
+                if kind == "imports" and row and row["product_id"]:
+                    # 删除任务记录不能让旧版快照回退入口重新冒出。
+                    connection.execute("INSERT OR IGNORE INTO local_hidden VALUES ('purged-import',?,?)", ("legacy:" + row["product_id"], now_iso()))
+                if kind == "products":
+                    connection.execute("DELETE FROM product_versions WHERE product_id=?", (item_id,))
+                    connection.execute("UPDATE captures SET product_id='' WHERE product_id=?", (item_id,))
+                    connection.execute("UPDATE miaoshou_import_records SET product_id='' WHERE product_id=?", (item_id,))
+                    # 2026-10-13：本次修改原因：商品不存在后移除其旧版回退标记，避免回收站统计留下空记录。
+                    connection.execute("DELETE FROM local_hidden WHERE kind IN ('imports','purged-import') AND item_id=?", ("legacy:" + item_id,))
+                    # 回传快照和回执独立保留，永久删除商品不会删除发送证据。
+                deleted += connection.execute(f"DELETE FROM {tables[kind]} WHERE id=?", (item_id,)).rowcount
+                connection.execute("DELETE FROM local_hidden WHERE kind=? AND item_id=?", (kind, item_id))
+        return {"deleted": deleted, "blocked": blocked}
 
     def finish_capture(self, capture_id: str, state: str, message: str, product_id: str = "") -> None:
         with self.connection() as connection:
@@ -121,8 +293,12 @@ class Repository:
 
     def products(self) -> list[Product]:
         with self.connection() as connection:
-            return [Product.from_dict(json.loads(row["body"])) for row in connection.execute(
-                "SELECT body FROM products ORDER BY updated_at DESC, rowid DESC")]
+            # return [Product.from_dict(json.loads(row["body"])) for row in connection.execute(
+            #     "SELECT body FROM products ORDER BY updated_at DESC, rowid DESC")]
+            # 2026-10-12：本次修改原因：商品移入回收站后腾出工作列表，完整版本及 ERP 身份仍留存。
+            return [Product.from_dict(json.loads(row["body"])) for row in connection.execute("""SELECT p.body FROM products p
+                WHERE NOT EXISTS (SELECT 1 FROM local_hidden h WHERE h.kind='products' AND h.item_id=p.id)
+                ORDER BY updated_at DESC, rowid DESC""")]
 
     # 2026-10-12：本次修改原因：API 导入按账号和 ERP ID 独立去重，数据库索引与平台来源分开，绝不覆盖插件商品的编辑。
     def store_miaoshou_import(self, product: Product) -> tuple[Product, bool]:
@@ -556,16 +732,3 @@ class Repository:
             else:
                 rows = connection.execute("SELECT * FROM erp_transfers ORDER BY created_at DESC,rowid DESC")
             return [dict(row) for row in rows]
-
-    def record_export(self, path: Path, products: list[Product]) -> None:
-        with self.connection() as connection:
-            # connection.execute("INSERT INTO exports VALUES (?,?,?,?,?,?,?)", (
-            # 2026-10-10：本次修改原因：导出记录表实际为六列，修正占位符数量。
-            connection.execute("INSERT INTO exports VALUES (?,?,?,?,?,?)", (
-                uuid.uuid4().hex, now_iso(), str(path), len(products), sum(len(p.skus) for p in products),
-                json.dumps({p.id: p.revision for p in products}),
-            ))
-
-    def exports(self) -> list[dict]:
-        with self.connection() as connection:
-            return [dict(row) for row in connection.execute("SELECT * FROM exports ORDER BY created_at DESC")]

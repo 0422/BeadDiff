@@ -3,7 +3,6 @@ import json
 from pathlib import Path
 
 from beaddiff.content import clean_description, sku_image_groups
-from beaddiff.exporter import HEADERS, product_rows
 from beaddiff.models import Product
 from beaddiff.parsing import parse_capture
 from beaddiff.service import CaptureService
@@ -50,7 +49,7 @@ def test_rich_detail_removes_executable_and_local_resources():
     assert all(value not in cleaned for value in ("script", "hidden", "onclick", "onerror", "file:", "javascript:"))
 
 
-def test_added_fields_roundtrip_and_do_not_change_template_columns():
+def test_added_fields_roundtrip():
     product = parse_capture(material())
     product.instruction_manual = "https://example.com/manual.pdf"
     product.body_size_chart = "https://example.com/body.jpg"
@@ -58,11 +57,6 @@ def test_added_fields_roundtrip_and_do_not_change_template_columns():
     product.skus[0].platform_sku = "SHOP-001"
     copy = Product.from_dict(product.to_dict())
     assert copy == product
-    rows = product_rows(copy)
-    assert len(rows[0]) == len(HEADERS) == 22
-    assert rows[0][7] == copy.description_html and "<img " in rows[0][7]
-    assert rows[0][16] == "SHOP-001"
-    assert rows[1][7] == ""
 
 
 def test_old_source_id_migrates_without_overwriting_merchant_code(tmp_path: Path):
@@ -117,7 +111,8 @@ def test_reparse_keeps_manual_rich_description_and_deliberate_clear(tmp_path: Pa
     repository.save_product(saved)
     service.reparse(result["captureId"])
     saved = repository.product(product.id)
-    assert saved.description_html == "" and product_rows(saved)[0][7] == ""
+    # 2026-10-12：本次修改原因：撤下表格导出后保留主动清空详情的存储回归覆盖。
+    assert saved.description_html == ""
 
 
 def test_old_manual_text_migrates_to_rich_detail_once(tmp_path: Path):

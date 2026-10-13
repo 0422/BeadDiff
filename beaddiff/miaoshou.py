@@ -6,6 +6,8 @@ import hashlib
 import hmac
 import json
 import time
+# 2026-10-12：本次修改原因：批量只读同步复用连接池，减少逐商品 DNS/TLS 握手开销。
+from contextlib import contextmanager
 # 2026-10-11：本次修改原因：HTML 图片链接可能带转义的查询参数，替换时须先解码再转义。
 from html import escape, unescape
 # 2026-10-12：本次修改原因：记录网络异常类型和代理是否配置，不输出代理地址、凭证或异常中的请求正文。
@@ -52,6 +54,21 @@ class MiaoshouClient:
     def __init__(self, config: MiaoshouConfig, transport: httpx.BaseTransport | None = None):
         self.config = config
         self.transport = transport
+        # 2026-10-12：本次修改原因：批量只读会话只用于查询，商品写回保持独立请求及原结果判定。
+        self._read_http = None
+
+    # 2026-10-12：本次修改原因：HTTPX 连接池可供有限数量的读取线程复用，批次结束保证释放资源。
+    @contextmanager
+    def read_session(self):
+        if self._read_http is not None:
+            raise RuntimeError("该客户端已有读取批次正在运行。")
+        with httpx.Client(timeout=self.config.timeout, transport=self.transport, follow_redirects=False,
+                          limits=httpx.Limits(max_connections=3, max_keepalive_connections=3)) as session:
+            self._read_http = session
+            try:
+                yield
+            finally:
+                self._read_http = None
 
     def _safe(self, value):
         if isinstance(value, dict):
@@ -90,10 +107,14 @@ class MiaoshouClient:
         if saving_product:
             context["submitted"] = self._safe(payload)
         try:
-            with httpx.Client(timeout=self.config.timeout, transport=self.transport, follow_redirects=False) as client:
-                # response = client.post(API_BASE + path, headers=headers, content=body.encode("utf-8"))
-                # 2026-10-11：本次修改原因：直接复用预先校验的 UTF-8 字节，不再次编码或序列化。
-                response = client.post(API_BASE + path, headers=headers, content=body_bytes)
+            # with httpx.Client(timeout=self.config.timeout, transport=self.transport, follow_redirects=False) as client:
+            #     response = client.post(API_BASE + path, headers=headers, content=body_bytes)
+            # 2026-10-12：本次修改原因：仅列表/详情读取使用批次连接池，绝不并发复用商品保存流程。
+            if self._read_http is not None and path in {LIST_PATH, DETAIL_PATH}:
+                response = self._read_http.post(API_BASE + path, headers=headers, content=body_bytes)
+            else:
+                with httpx.Client(timeout=self.config.timeout, transport=self.transport, follow_redirects=False) as client:
+                    response = client.post(API_BASE + path, headers=headers, content=body_bytes)
         except httpx.HTTPError as error:
             # 网络异常可能在请求到达服务器以后发生，不自动重试商品保存。
             # 2026-10-12：本次修改原因：区分连接/响应超时、代理失败和连接失败，保留脱敏诊断以判断 VPN 是否相关。
@@ -244,13 +265,18 @@ class MiaoshouAdapter:
         return MiaoshouClient(self.store.get(), self.transport)
 
     # 2026-10-12：本次修改原因：逐张读取/保存账号隔离的成功缓存，后续图片失败或应用重启不丢失已经取得的上传回执。
-    def _prepare_pictures(self, client: MiaoshouClient, payload: dict, remote: dict) -> tuple[dict, dict]:
+    # def _prepare_pictures(self, client: MiaoshouClient, payload: dict, remote: dict) -> tuple[dict, dict]:
+    # 2026-10-12：本次修改原因：图片转存及缓存复用按实际图片序号报告阶段。
+    def _prepare_pictures(self, client: MiaoshouClient, payload: dict, remote: dict, notify=None) -> tuple[dict, dict]:
         urls = picture_urls(payload)
         old_pictures = set(picture_urls(remote))
         progress = {"total": len(urls), "uploaded": 0, "cache_saved": 0, "cache_reused": 0, "remote_reused": 0}
         replacements = {}
         try:
             for index, url in enumerate(urls, 1):
+                # 2026-10-12：本次修改原因：界面可区分图片准备与商品提交，避免长等待没有反馈。
+                if notify:
+                    notify(f"准备图片 {index}/{len(urls)}")
                 if url in old_pictures:
                     progress["remote_reused"] += 1
                     continue
@@ -318,6 +344,9 @@ class MiaoshouAdapter:
         picture_progress = {}
         try:
             if request.mode == "update":
+                # 2026-10-12：本次修改原因：更新先读最新原商品，阶段提示与实际请求保持一致。
+                if request.progress:
+                    request.progress("读取妙手原商品")
                 detail = client.detail(request.original_id)
                 remote = detail["editCommonCollectBoxDetail"]
                 payload, links = update_payload(product, remote, client.config)
@@ -332,11 +361,16 @@ class MiaoshouAdapter:
             # replacements = {url: client.upload_picture(url) for url in picture_urls(payload) if url not in old_pictures}
             # payload = _replace_pictures(deepcopy(payload), replacements)
             # 2026-10-12：本次修改原因：替换一次性上传推导式；每张成功图立即缓存，失败后的重试保留已有进度。
-            payload, picture_progress = self._prepare_pictures(client, payload, remote)
+            # payload, picture_progress = self._prepare_pictures(client, payload, remote)
+            # 2026-10-12：本次修改原因：向任务界面报告图片阶段，失败和缓存逻辑保持原契约。
+            payload, picture_progress = self._prepare_pictures(client, payload, remote, request.progress)
             validate_payload(payload)
         except ValueError as error:
             raise ERPNotSentError(str(error)) from None
         if request.mode == "create":
+            # 2026-10-12：本次修改原因：仅准备及校验完成后显示商品提交阶段。
+            if request.progress:
+                request.progress("提交新增商品至公共采集箱")
             response = client.call(CREATE_PATH, payload, saving_product=True)
             data = response.get("data")
             try:
@@ -351,6 +385,9 @@ class MiaoshouAdapter:
         else:
             target = str(detail_id(request.original_id))
             body = {"commonCollectBoxDetailId": int(target), "editCommonCollectBoxDetail": payload, "ossMd5": detail["ossMd5"]}
+            # 2026-10-12：本次修改原因：明确更新原商品的实际提交阶段。
+            if request.progress:
+                request.progress("提交更新商品至公共采集箱")
             response = client.call(UPDATE_PATH, body, saving_product=True)
             data = response.get("data")
             acknowledgment = data.get("ossMd5", "") if isinstance(data, dict) else ""

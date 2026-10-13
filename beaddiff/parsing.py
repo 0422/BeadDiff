@@ -331,7 +331,8 @@ def parse_capture(payload: dict) -> Product:
     if not product.skus:
         product.warnings.append("未识别到实际 SKU，没有自动创建规格或库存。")
     if any(sku.source_price for sku in product.skus):
-        product.warnings.append("来源价格仅供核对，原始单位可能为分或格式化文本；请自行填写实际导出售价。")
+        # 2026-10-12：本次修改原因：撤下表格路线，来源价格只供核对，实际销售价仍需确认。
+        product.warnings.append("来源价格仅供核对，原始单位可能为分或格式化文本；请自行填写实际售价。")
     if not product.currency:
         product.warnings.append("材料中没有明确币种，请人工确认，不能仅凭站点推定。")
     return product

@@ -14,6 +14,8 @@ from ..ai.client import CompatibleClient
 from ..ai.config import ModelConfigStore, ModelProfile
 from ..assets import AssetStore
 from .ai_runner import TaskHub
+# 2026-10-13：本次修改原因：模型表沿用统一行高、完整内容查看和主题样式。
+from .table_support import configure_table
 from .widgets import button, label
 
 
@@ -91,17 +93,26 @@ class ModelSettingsPage(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(22, 22, 22, 22)
         layout.setSpacing(16)
-        row = QHBoxLayout()
-        row.addWidget(label("AI 模型", "sectionTitle"))
-        row.addStretch()
+        # row = QHBoxLayout()
+        # row.addWidget(label("AI 模型", "sectionTitle"))
+        # 2026-10-13：本次修改原因：设置分组已显示 AI 模型，撤下重复标题与常驻说明。
+        # row.addStretch()
         self.reload_button = button("重新加载配置", self.reload)
-        row.addWidget(self.reload_button)
-        layout.addLayout(row)
-        layout.addWidget(label(str(store.path), "muted", True))
-        layout.addWidget(label("文本与图片分别选择当前模型。新增任务使用当前项；模型数据只保存在本机配置文件。", "hint", True))
+        # row.addWidget(self.reload_button)
+        # layout.addLayout(row)
+        # 2026-10-13：本次修改原因：重新加载配置移至页内右下角，顶部直接呈现模型分类。
+        # layout.addWidget(label(str(store.path), "muted", True))
+        # layout.addWidget(label("文本与图片分别选择当前模型。新增任务使用当前项；模型数据只保存在本机配置文件。", "hint", True))
+        # 2026-10-13：本次修改原因：配置路径仍可在重新加载按钮的悬停提示查看，系统设置集中展示存储目录。
+        self.reload_button.setToolTip("配置文件：" + str(store.path))
         self.error = label("", "warning", True)
         layout.addWidget(self.error)
         self.tabs = QTabWidget()
+        # self.tabs.setToolTip("文本与图片分别选择当前模型，新增任务使用当前配置。")
+        # 2026-10-13：本次修改原因：分类标签各有边界，配置区统一圆角框，取消整页悬停提示遮挡操作。
+        self.tabs.setObjectName("modelTabs")
+        self.tabs.tabBar().setObjectName("modelTypeTabs")
+        self.tabs.tabBar().setExpanding(False)
         self.tables: dict[str, QTableWidget] = {}
         self.current_labels = {}
         self.controls = []
@@ -109,7 +120,12 @@ class ModelSettingsPage(QWidget):
             page = QWidget()
             contents = QVBoxLayout(page)
             self.current_labels[kind] = label("", "hint", True)
-            contents.addWidget(self.current_labels[kind])
+            # contents.addWidget(self.current_labels[kind])
+            # 2026-10-13：本次修改原因：当前模型已由状态列标识，撤下重复文本，保留原刷新对象。
+            self.current_labels[kind].setParent(page)
+            self.current_labels[kind].hide()
+            contents.setContentsMargins(16, 16, 16, 16)
+            contents.setSpacing(12)
             actions = QHBoxLayout()
             for text, callback in (("新增", lambda _checked=False, kind=kind: self.edit(kind)),
                     ("编辑", lambda _checked=False, kind=kind: self.edit(kind, self.selected(kind))),
@@ -134,9 +150,14 @@ class ModelSettingsPage(QWidget):
             table.setColumnWidth(2, 120)
             table.setColumnWidth(4, 180)
             table.cellDoubleClicked.connect(lambda _r, _c, kind=kind: self.activate(kind))
+            configure_table(table, editable=False)
+            # 2026-10-13：本次修改原因：设置内容区已有圆角边界，模型列表取消叠加的表格外框。
+            table.setProperty("embeddedTable", True)
             self.tables[kind] = table
             contents.addWidget(table, 1)
-            contents.addWidget(label("双击配置可切换当前项；API Key 在编辑窗口中查看。接口检查仅访问模型列表，不发起生成。", "hint", True))
+            # contents.addWidget(label("双击配置可切换当前项；API Key 在编辑窗口中查看。接口检查仅访问模型列表，不发起生成。", "hint", True))
+            # 2026-10-13：本次修改原因：重复操作说明改为悬停提示，当前模型、检查结果与错误反馈仍直接显示。
+            table.setToolTip("双击配置切换当前项；API Key 在编辑窗口查看。接口检查仅访问模型列表，不发起生成。")
             self.tabs.addTab(page, caption)
         video = QWidget()
         video_layout = QVBoxLayout(video)
@@ -145,7 +166,12 @@ class ModelSettingsPage(QWidget):
         self.tabs.addTab(video, "视频 · 预留")
         layout.addWidget(self.tabs, 1)
         self.status = label("", "hint", True)
-        layout.addWidget(self.status)
+        # layout.addWidget(self.status)
+        # 2026-10-13：本次修改原因：底部反馈与重新加载按钮共用一行，右下角位置保持稳定。
+        footer = QHBoxLayout()
+        footer.addWidget(self.status, 1)
+        footer.addWidget(self.reload_button)
+        layout.addLayout(footer)
         self.refresh()
 
     def refresh(self):
@@ -202,7 +228,11 @@ class ModelSettingsPage(QWidget):
         if not selected:
             return
         note = "删除当前配置后，此类别会恢复为未选择状态。" if self.store.active[kind] == selected else ""
-        if QMessageBox.question(self, "删除模型配置", "确认删除所选配置？" + note) != QMessageBox.StandardButton.Yes:
+        # if QMessageBox.question(self, "删除模型配置", "确认删除所选配置？" + note) != QMessageBox.StandardButton.Yes:
+        # 2026-10-13：本次修改原因：删除配置的默认焦点为取消，保留原删除行为。
+        if QMessageBox.question(self, "删除模型配置", "确认删除所选配置？" + note,
+                                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                                QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
             return
         try:
             self.store.remove(selected)
@@ -231,11 +261,18 @@ class ModelSettingsPage(QWidget):
         self.checking = True
         self.refresh()
         self.reload_button.setEnabled(False)
+        # 2026-10-13：本次修改原因：连接检查期间原按钮展示 loading 文案，不发起生成请求。
+        for control in self.controls:
+            if control.text() == "检查接口":
+                control.setText("正在检查…")
         self.status.setText("正在检查鉴权与模型列表…")
         self.hub.submit(lambda _progress: CompatibleClient(profile, self.assets).check(), self.check_done, self.check_done)
 
     def check_done(self, message):
         self.checking = False
+        for control in self.controls:
+            if control.text() == "正在检查…":
+                control.setText("检查接口")
         self.reload_button.setEnabled(True)
         self.refresh()
         self.status.setText(str(message))

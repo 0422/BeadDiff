@@ -4,9 +4,7 @@ from pathlib import Path
 from urllib.parse import urlencode
 
 import pytest
-from openpyxl import load_workbook
 
-from beaddiff.exporter import HEADERS, export_products
 from beaddiff.parsing import parse_capture
 from beaddiff.service import CaptureService, envelopes_from_file
 from beaddiff.storage import Repository
@@ -116,27 +114,3 @@ def test_har_and_urlencoded_import_extract_body_only(tmp_path: Path):
     envelope = envelopes_from_file(har)[0]
     assert envelope["payload"] == form
     assert "do-not-copy" not in json.dumps(envelope)
-
-
-def test_export_requires_approval_and_keeps_ids_as_text(tmp_path: Path):
-    repository = Repository(tmp_path / "data")
-    result = CaptureService(repository).ingest(payload())
-    product = repository.product(result["productId"])
-    path = tmp_path / "export.xlsx"
-    with pytest.raises(ValueError, match="审核"):
-        export_products(repository, [product.id], path)
-    product.title = "=1+1"
-    product.skus[0].platform_sku = "00000000000000000001"
-    for sku in product.skus:
-        sku.price = "12.50"
-    repository.save_product(product, approve=True)
-    assert export_products(repository, [product.id], path) == (1, 2)
-    book = load_workbook(path)
-    sheet = book.active
-    assert [cell.value for cell in sheet[1]] == HEADERS
-    assert sheet.max_column == 22 and sheet.max_row == 3
-    assert sheet["Q2"].value == "00000000000000000001"
-    assert sheet["B2"].value == "=1+1" and sheet["B2"].data_type == "s"
-    assert sheet["D2"].value and sheet["D3"].value is None
-    assert len(repository.exports()) == 1
-    book.close()

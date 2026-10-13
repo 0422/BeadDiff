@@ -10,7 +10,9 @@ from beaddiff.storage import Repository
 
 def test_connection_authentication_and_capture_ack(tmp_path):
     repository = Repository(tmp_path)
-    settings = Settings(tmp_path, "test-token-that-is-long-enough", port=0)
+    # settings = Settings(tmp_path, "test-token-that-is-long-enough", port=0)
+    # 2026-10-12：本次修改原因：插件测试显式启用备用路线，新安装默认接口取数。
+    settings = Settings(tmp_path, "test-token-that-is-long-enough", port=0, capture_route="plugin")
     changes = []
     receiver = LocalReceiver(settings, CaptureService(repository), lambda: changes.append(True))
     assert receiver.start()
@@ -39,5 +41,13 @@ def test_connection_authentication_and_capture_ack(tmp_path):
         assert status == 200 and body["accepted"] and body["captureId"]
         assert len(repository.captures()) == 1
         assert request("POST", "/api/v1/captures", capture, token=settings.token)[1]["duplicate"]
+        # 2026-10-12：本次修改原因：切换路线后拒绝新材料，历史记录保留，停止后仍可重新启用。
+        settings.capture_route = "miaoshou"
+        status, body = request("POST", "/api/v1/captures", capture, token=settings.token)
+        assert status == 503 and "暂停" in body["error"]
+        assert len(repository.captures()) == 1
+        settings.capture_route = "plugin"
+        receiver.stop()
+        assert receiver.server is None and receiver.start()
     finally:
         receiver.stop()

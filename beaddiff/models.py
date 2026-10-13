@@ -129,6 +129,17 @@ class Product:
     # 2026-10-12：本次修改原因：新增副本始终比较首次导入基线，不能被成功更新后的增量基线抹掉已加工字段。
     erp_import_baseline: dict[str, Any] = field(default_factory=dict)
 
+    # 2026-10-12：本次修改原因：获取方式与货源平台分开展示，兼容现有商品而不改写原数据。
+    @property
+    def acquisition_route(self) -> str:
+        if self.erp_imported:
+            return "miaoshou"
+        return "upload" if self.source == "upload" else "plugin"
+
+    @property
+    def acquisition_label(self) -> str:
+        return {"miaoshou": "妙手接口", "plugin": "插件同步", "upload": "自上传"}[self.acquisition_route]
+
     # 2026-10-11：本次修改原因：文本、图片顺序、属性和可编辑 SKU 共用实际内容比较；排除预览缓存和来源只读价格。
     def business_content(self) -> dict[str, Any]:
         names = (

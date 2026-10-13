@@ -17,7 +17,6 @@ from beaddiff.ai.contracts import AIRequest
 from beaddiff.ai.service import AIService
 from beaddiff.assets import AssetStore, local_asset_path
 from beaddiff.content import clean_description, description_images
-from beaddiff.exporter import export_products
 from beaddiff.models import Product, SKU
 from beaddiff.storage import Repository
 
@@ -210,7 +209,7 @@ def test_white_photo_text_uses_subject_and_reference_without_mutating_product(mo
     assert json.dumps(product) == before
 
 
-def test_managed_images_survive_editing_and_are_not_exported_as_file_paths(tmp_path, png):
+def test_managed_images_survive_editing(tmp_path, png):
     assets = AssetStore(tmp_path / "data")
     image = assets.save(png)
     assert local_asset_path(image.uri).read_bytes() == png
@@ -224,9 +223,6 @@ def test_managed_images_survive_editing_and_are_not_exported_as_file_paths(tmp_p
                                                 images=[image.uri], skus=[SKU(price="9.90", currency="USD")]))
     product = repository.save_product(product, approve=True)
     assert product.approved
-    with pytest.raises(ValueError, match="本地图片"):
-        export_products(repository, [product.id], tmp_path / "export.xlsx")
-    assert not (tmp_path / "export.xlsx").exists()
     assert repository.captures() == []
 
 

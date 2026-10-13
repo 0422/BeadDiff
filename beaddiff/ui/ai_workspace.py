@@ -4,7 +4,9 @@ from __future__ import annotations
 from dataclasses import asdict
 import json
 
-from PySide6.QtCore import Qt
+# from PySide6.QtCore import Qt
+# 2026-10-13：本次修改原因：独立的关闭信号避开原AI任务finished回调名称，内嵌候选生命周期不改任务逻辑。
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QFormLayout, QHBoxLayout, QListWidget, QListWidgetItem,
     QMessageBox, QPlainTextEdit, QScrollArea, QSpinBox, QSplitter, QVBoxLayout, QWidget,
@@ -14,6 +16,8 @@ from ..ai.contracts import AIRequest, AIResult
 from ..ai.service import AIService, facts
 from ..content import detail_html, description_images
 from .ai_runner import TaskHub
+# 2026-10-13：本次修改原因：AI 输入/候选区域复用可记忆分栏，生成请求和应用规则保持原样。
+from .layout_support import PersistentSplitter, Panel, save_splitters
 from .media_list import MediaList
 from .model_settings import ModelSettingsDialog
 from .widgets import ImagePreview, button, label
@@ -24,6 +28,7 @@ TITLES = {"title": "AI 产品标题", "simple_description": "AI 简易描述", "
 
 
 class AIWorkspace(QDialog):
+    closed = Signal(int)
     def __init__(self, service: AIService, hub: TaskHub, product: dict, operation: str, network,
                  subject: str = "", parent=None):
         super().__init__(parent)
@@ -46,7 +51,9 @@ class AIWorkspace(QDialog):
         self.settings_button = button("模型设置", self.configure_models)
         heading.addWidget(self.settings_button)
         root.addLayout(heading)
-        splitter = QSplitter()
+        # splitter = QSplitter()
+        # 2026-10-13：本次修改原因：内嵌到编辑器右侧时上下排列，避免窄侧栏塞入两列图片工具。
+        splitter = PersistentSplitter(Qt.Orientation.Vertical, "ui/ai_workspace/input_output_splitter_v1", [420, 380], self)
         inputs = QWidget()
         left = QVBoxLayout(inputs)
         form = QFormLayout()
@@ -124,7 +131,11 @@ class AIWorkspace(QDialog):
         scroll.setWidget(inputs)
         # 2026-10-11：本次修改原因：提交时冻结输入，重做期间保护候选次序。
         self.inputs = inputs
-        splitter.addWidget(scroll)
+        # splitter.addWidget(scroll)
+        scroll.setMinimumSize(0, 0)
+        # splitter.addWidget(Panel("生成要求与参考素材", scroll))
+        # 2026-10-13：本次修改原因：用户主动进入 AI 后展开操作表单，辅助区默认收起不隐藏正在使用的主界面。
+        splitter.addWidget(Panel("生成要求与参考素材", scroll, default_collapsed=False))
         outputs = QWidget()
         right = QVBoxLayout(outputs)
         history_row = QHBoxLayout()
@@ -163,8 +174,15 @@ class AIWorkspace(QDialog):
         self.application.setVisible(self.is_image)
         right.addWidget(self.application)
         right.addWidget(label("图片可勾选、排序后应用；尺寸以实际生成结果为准。套图每张独立请求，部分失败会保留成功项。", "hint", True))
-        splitter.addWidget(outputs)
-        splitter.setSizes([600, 580])
+        # splitter.addWidget(outputs)
+        # splitter.setSizes([600, 580])
+        # 2026-10-13：本次修改原因：候选区内部滚动，高 DPI/小窗口下不裁掉应用和排序控件。
+        output_scroll = QScrollArea()
+        output_scroll.setWidgetResizable(True)
+        output_scroll.setWidget(outputs)
+        output_scroll.setMinimumSize(0, 0)
+        # splitter.addWidget(Panel("候选预览与历史", output_scroll))
+        splitter.addWidget(Panel("候选预览与历史", output_scroll, default_collapsed=False))
         root.addWidget(splitter, 1)
         self.status = label("生成候选将留档；应用只更新编辑表单，保存商品后才形成新版本。", "hint", True)
         root.addWidget(self.status)
@@ -400,4 +418,7 @@ class AIWorkspace(QDialog):
         if self.busy:
             QMessageBox.information(self, "AI 任务正在进行", "请等待任务完成；生成结果会自动留档。")
             return
+        # 2026-10-13：本次修改原因：关闭候选时记住布局，不影响任务留档和 accept/reject 结果。
+        save_splitters(self)
         super().done(result)
+        self.closed.emit(int(result))

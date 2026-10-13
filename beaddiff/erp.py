@@ -2,10 +2,14 @@
 from __future__ import annotations
 
 import json
+# 2026-10-12：本次修改原因：发送前的检查记录失败也向用户反馈。
+import sqlite3
 # from dataclasses import dataclass
 # 2026-10-11：本次修改原因：回执保存真实开放平台响应，供本地核查。
 from dataclasses import dataclass, field
-from typing import Protocol
+# from typing import Protocol
+# 2026-10-12：本次修改原因：回传服务通过可选回调报告实际阶段，界面与无界面调用共用发送逻辑。
+from typing import Callable, Protocol
 
 from .content import description_images
 from .models import Product
@@ -27,6 +31,8 @@ class ERPRequest:
     mode: str
     product: Product
     original_id: str
+    # 2026-10-12：本次修改原因：适配器可报告查详情、图片准备和商品提交阶段，不改写商品快照。
+    progress: Callable[[str], None] | None = None
 
 
 @dataclass(frozen=True)
@@ -114,11 +120,16 @@ class ERPService:
         return list(dict.fromkeys(result))
 
     # 2026-10-11：本次修改原因：按钮创建可追溯记录；快照重检后才发送，超时或无效回执不能标为已传或自动重发。
-    def transfer(self, product_ids: list[str], mode: str) -> list[dict]:
+    # def transfer(self, product_ids: list[str], mode: str) -> list[dict]:
+    # 2026-10-12：本次修改原因：批量回传报告实际商品序号及阶段，不把开始任务当成保存成功。
+    def transfer(self, product_ids: list[str], mode: str, progress: Callable[[str], None] | None = None) -> list[dict]:
         if mode not in MODE_LABELS:
             raise ValueError("请选择有效的回传方式。")
         results = []
-        for product_id in dict.fromkeys(product_ids):
+        # for product_id in dict.fromkeys(product_ids):
+        # 2026-10-12：本次修改原因：进度按去重后的真实商品数计算。
+        targets = list(dict.fromkeys(product_ids))
+        for index, product_id in enumerate(targets, 1):
             # 2026-10-11：本次修改原因：发送后本地落库失败也属于结果未知，不能向用户报告成未发送。
             record = None
             sent = False
@@ -126,6 +137,10 @@ class ERPService:
                 product = self.repository.product(product_id)
                 if product is None:
                     raise ValueError("商品不存在。")
+                # 2026-10-12：本次修改原因：每个商品携带独立阶段前缀，供后台任务安全发送 Qt 信号。
+                report = (lambda stage: progress(f"{index}/{len(targets)} · {(product.title or product.main_code)[:45]} · {stage}")) if progress else None
+                if report:
+                    report("检查当前版本、审核与回传条件")
                 errors = self.issues(product, mode)
                 record = self.repository.create_erp_transfer(product_id, mode, "blocked", "\n".join(errors))
                 # 冻结后重新校验，避免预检查和取快照之间商品已经改变。
@@ -137,7 +152,9 @@ class ERPService:
                     continue
                 self._sending(record["id"])
                 sent = True
-                request = ERPRequest(record["id"], mode, snapshot, snapshot.erp_original_id)
+                # request = ERPRequest(record["id"], mode, snapshot, snapshot.erp_original_id)
+                # 2026-10-12：本次修改原因：将进度回调传给适配器，原有适配器仍可忽略该可选字段。
+                request = ERPRequest(record["id"], mode, snapshot, snapshot.erp_original_id, report)
                 try:
                     receipt = self.adapter.send(request)
                     if (not isinstance(receipt, ERPReceipt) or receipt.mode != mode
@@ -158,6 +175,9 @@ class ERPService:
                     state, message = "unknown", "未取得可信的成功回执，结果未知。请先在妙手核对，避免重复新增。"
                     self.repository.finish_erp_transfer(record["id"], state, message)
                 else:
+                    # 2026-10-12：本次修改原因：取得成功回执后才提示保存本机结果。
+                    if report:
+                        report("已取得回执，保存本机记录")
                     # state, message = "succeeded", "妙手已确认保存。"
                     # 2026-10-11：本次修改原因：明确写入公共采集箱，发布仍由妙手执行。
                     state, message = "succeeded", "妙手公共采集箱已确认保存，发布请在妙手完成。"
@@ -186,6 +206,24 @@ class ERPService:
                 results.append({"id": record["id"] if record else "", "product_id": product_id,
                                 "state": state, "message": message})
         return results
+
+    # 2026-10-12：本次修改原因：界面预检查失败写本机记录，已有未知任务继续保留。
+    def record_preflight(self, problems: list[tuple[str, list[str]]], mode: str, account_id: str) -> list[str]:
+        errors = []
+        for product_id, issues in problems:
+            try:
+                if any(row["state"] in {"sending", "unknown"} for row in self.repository.erp_transfers(product_id)):
+                    continue
+                record = self.repository.create_erp_transfer(product_id, mode, "blocked", "\n".join(issues))
+                # self.repository.finish_erp_transfer(record["id"], "blocked", "\n".join(issues),
+                #                                     receipt={"account_id": account_id, "preflight": True})
+                # 2026-10-12：本次修改原因：前置检查未进入发送态，只补充账号元数据，不调用发送回执终结方法。
+                with self.repository.connection() as connection:
+                    connection.execute("UPDATE erp_transfers SET receipt=? WHERE id=? AND state='blocked'",
+                        (json.dumps({"account_id": account_id, "preflight": True}), record["id"]))
+            except (ValueError, OSError, sqlite3.Error) as error:
+                errors.append(str(error))
+        return errors
 
     def _blocked(self, transfer_id: str, message: str) -> None:
         with self.repository.connection() as connection:

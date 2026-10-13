@@ -5,13 +5,19 @@ from PySide6.QtCore import Qt, Signal
 # from PySide6.QtWidgets import QDialog, QHBoxLayout, QHeaderView, QPlainTextEdit, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget
 # 2026-10-11：本次修改原因：允许从本机上传图片并请求 AI 处理当前图片。
 from pathlib import Path
-from PySide6.QtWidgets import QDialog, QFileDialog, QHBoxLayout, QHeaderView, QMessageBox, QPlainTextEdit, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget
+# from PySide6.QtWidgets import QDialog, QFileDialog, QHBoxLayout, QHeaderView, QMessageBox, QPlainTextEdit, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget
+# 2026-10-12：本次修改原因：图片操作改为网格工具栏，不再依赖单行水平布局。
+from PySide6.QtWidgets import QDialog, QFileDialog, QGridLayout, QHeaderView, QMessageBox, QPlainTextEdit, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget
 
 from ..assets import AssetStore
 
 # from .widgets import button
 # 2026-10-12：本次修改原因：图片列表实时展示当前张数及超限提醒。
 from .widgets import button, label
+# 2026-10-12：本次修改原因：所有图片列表共享安全行高及完整链接查看入口。
+# from .table_support import configure_table
+# 2026-10-13：本次修改原因：图片列表按完整行数调整高度，不再固定区间截出半行或留下大块空白。
+from .table_support import configure_table, fit_table_rows
 
 
 class MediaList(QWidget):
@@ -40,21 +46,36 @@ class MediaList(QWidget):
         self.table.setHorizontalHeaderLabels(["图片地址（按行排序）", "像素尺寸"])
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self.table.setColumnWidth(1, 130)
-        self.table.setMinimumHeight(155)
-        self.table.setMaximumHeight(230)
+        # self.table.setMinimumHeight(155)
+        # self.table.setMaximumHeight(230)
         self.table.setAlternatingRowColors(True)
+        configure_table(self.table)
+        fit_table_rows(self.table, maximum_rows=6)
         layout.addWidget(self.table)
-        actions = QHBoxLayout()
-        actions.addWidget(button("新增 / 批量粘贴", self.add_urls))
+        # actions = QHBoxLayout()
+        # 2026-10-12：本次修改原因：图片工具栏按两行排列，避免窄窗口将表格和所在表单撑出边界。
+        actions = QGridLayout()
+        # 2026-10-13：本次修改原因：图片操作按钮按内容宽度靠左排列，不再拉伸为三列大矩形。
+        actions.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        actions.setHorizontalSpacing(8)
+        actions.setVerticalSpacing(8)
+        action_buttons = []
+        # actions.addWidget(button("新增 / 批量粘贴", self.add_urls))
+        action_buttons.append(button("新增 / 批量粘贴", self.add_urls))
         # 2026-10-11：本次修改原因：白底图和参考图直接上传，不需要先取得网络链接。
         if assets:
-            actions.addWidget(button("上传图片", self.upload))
+            # actions.addWidget(button("上传图片", self.upload))
+            action_buttons.append(button("上传图片", self.upload))
         if enable_ai:
-            actions.addWidget(button("AI 改选中图", self.request_ai))
-        actions.addWidget(button("移除选中", self.remove_selected))
-        actions.addWidget(button("上移", lambda: self.move(-1)))
-        actions.addWidget(button("下移", lambda: self.move(1)))
-        actions.addStretch()
+            # actions.addWidget(button("AI 改选中图", self.request_ai))
+            action_buttons.append(button("AI 改选中图", self.request_ai))
+        # actions.addWidget(button("移除选中", self.remove_selected))
+        # actions.addWidget(button("上移", lambda: self.move(-1)))
+        # actions.addWidget(button("下移", lambda: self.move(1)))
+        # actions.addStretch()
+        action_buttons += [button("移除选中", self.remove_selected), button("上移", lambda: self.move(-1)), button("下移", lambda: self.move(1))]
+        for index, action in enumerate(action_buttons):
+            actions.addWidget(action, index // 3, index % 3)
         layout.addLayout(actions)
         # 2026-10-12：本次修改原因：打开编辑器即检查已有超限图片，新增、移除、AI 应用后跟随刷新。
         self.count_hint = label("", "hint", True)

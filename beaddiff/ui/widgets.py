@@ -15,49 +15,103 @@ from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequ
 from PySide6.QtWidgets import QFrame, QGridLayout, QHBoxLayout, QLabel, QPushButton, QVBoxLayout
 
 
+# 2026-10-13：本次修改原因：原固定24像素图标注释保留，SVG矢量引擎适配125%/150%缩放。
+# def icon(name: str, color: str = "#70888d") -> QIcon:
+#     pixmap = QPixmap(24, 24)
+#     pixmap.fill(Qt.GlobalColor.transparent)
+#     painter = QPainter(pixmap)
+#     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+#     painter.setPen(QPen(QColor(color), 1.7, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+#     if name == "products":
+#         painter.drawRoundedRect(4, 4, 6, 6, 1, 1)
+#         painter.drawRoundedRect(14, 4, 6, 6, 1, 1)
+#         painter.drawRoundedRect(4, 14, 6, 6, 1, 1)
+#         painter.drawRoundedRect(14, 14, 6, 6, 1, 1)
+#     elif name == "capture":
+#         painter.drawRoundedRect(4, 6, 16, 14, 2, 2)
+#         painter.drawLine(8, 3, 8, 9)
+#         painter.drawLine(16, 3, 16, 9)
+#         painter.drawLine(8, 13, 16, 13)
+#         painter.drawLine(8, 17, 13, 17)
+#     elif name in {"import", "export"}:
+#         painter.drawLine(4, 15, 4, 20)
+#         painter.drawLine(4, 20, 20, 20)
+#         painter.drawLine(20, 20, 20, 15)
+#         painter.drawLine(12, 3, 12, 15)
+#         end, start = (3, 7) if name == "export" else (15, 11)
+#         painter.drawLine(8, start, 12, end)
+#         painter.drawLine(12, end, 16, start)
+#     elif name == "settings":
+#         for x, y in ((6, 8), (12, 15), (18, 10)):
+#             painter.drawLine(x, 3, x, y - 3)
+#             painter.drawEllipse(x - 2, y - 2, 4, 4)
+#             painter.drawLine(x, y + 3, x, 21)
+#     elif name == "search":
+#         painter.drawEllipse(4, 3, 12, 12)
+#         painter.drawLine(14, 14, 21, 21)
+#     else:
+#         painter.drawLine(5, 12, 10, 17)
+#         painter.drawLine(10, 17, 20, 6)
+#     painter.end()
+#     return QIcon(pixmap)
+
+from PySide6.QtCore import QByteArray, QRect, QSize
+from PySide6.QtGui import QIconEngine
+from PySide6.QtSvg import QSvgRenderer
+
+
+class SvgIconEngine(QIconEngine):
+    def __init__(self, svg: str):
+        super().__init__()
+        self.svg = svg
+
+    def clone(self):
+        return SvgIconEngine(self.svg)
+
+    def paint(self, painter, rect, mode, state):
+        painter.save()
+        if mode == QIcon.Mode.Disabled:
+            painter.setOpacity(0.45)
+        QSvgRenderer(QByteArray(self.svg.encode("utf-8"))).render(painter, rect)
+        painter.restore()
+
+    def pixmap(self, size, mode, state):
+        return self.scaledPixmap(size, mode, state, 1.0)
+
+    def scaledPixmap(self, size, mode, state, scale):
+        pixmap = QPixmap(QSize(round(size.width() * scale), round(size.height() * scale)))
+        pixmap.fill(Qt.GlobalColor.transparent)
+        pixmap.setDevicePixelRatio(scale)
+        painter = QPainter(pixmap)
+        self.paint(painter, QRect(0, 0, size.width(), size.height()), mode, state)
+        painter.end()
+        return pixmap
+
+
 def icon(name: str, color: str = "#70888d") -> QIcon:
-    pixmap = QPixmap(24, 24)
-    pixmap.fill(Qt.GlobalColor.transparent)
-    painter = QPainter(pixmap)
-    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-    painter.setPen(QPen(QColor(color), 1.7, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
-    if name == "products":
-        painter.drawRoundedRect(4, 4, 6, 6, 1, 1)
-        painter.drawRoundedRect(14, 4, 6, 6, 1, 1)
-        painter.drawRoundedRect(4, 14, 6, 6, 1, 1)
-        painter.drawRoundedRect(14, 14, 6, 6, 1, 1)
-    elif name == "capture":
-        painter.drawRoundedRect(4, 6, 16, 14, 2, 2)
-        painter.drawLine(8, 3, 8, 9)
-        painter.drawLine(16, 3, 16, 9)
-        painter.drawLine(8, 13, 16, 13)
-        painter.drawLine(8, 17, 13, 17)
-    elif name in {"import", "export"}:
-        painter.drawLine(4, 15, 4, 20)
-        painter.drawLine(4, 20, 20, 20)
-        painter.drawLine(20, 20, 20, 15)
-        painter.drawLine(12, 3, 12, 15)
-        end, start = (3, 7) if name == "export" else (15, 11)
-        painter.drawLine(8, start, 12, end)
-        painter.drawLine(12, end, 16, start)
-    elif name == "settings":
-        for x, y in ((6, 8), (12, 15), (18, 10)):
-            painter.drawLine(x, 3, x, y - 3)
-            painter.drawEllipse(x - 2, y - 2, 4, 4)
-            painter.drawLine(x, y + 3, x, 21)
-    elif name == "search":
-        painter.drawEllipse(4, 3, 12, 12)
-        painter.drawLine(14, 14, 21, 21)
-    else:
-        painter.drawLine(5, 12, 10, 17)
-        painter.drawLine(10, 17, 20, 6)
-    painter.end()
-    return QIcon(pixmap)
+    paths = {
+        "products": '<rect x="4" y="4" width="6" height="6" rx="1"/><rect x="14" y="4" width="6" height="6" rx="1"/><rect x="4" y="14" width="6" height="6" rx="1"/><rect x="14" y="14" width="6" height="6" rx="1"/>',
+        "capture": '<rect x="4" y="6" width="16" height="14" rx="2"/><path d="M8 3v6m8-6v6M8 13h8m-8 4h5"/>',
+        "import": '<path d="M4 15v5h16v-5M12 3v12m-4-4 4 4 4-4"/>',
+        "export": '<path d="M4 15v5h16v-5M12 15V3m-4 4 4-4 4 4"/>',
+        "settings": '<path d="M6 3v3m0 4v11M12 3v10m0 4v4M18 3v5m0 4v9"/><circle cx="6" cy="8" r="2"/><circle cx="12" cy="15" r="2"/><circle cx="18" cy="10" r="2"/>',
+        "search": '<circle cx="10" cy="9" r="6"/><path d="m14 14 7 7"/>',
+    }
+    shape = paths.get(name, '<path d="m5 12 5 5L20 6"/>')
+    return QIcon(SvgIconEngine(
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"><g fill="none" stroke="{color}" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">{shape}</g></svg>'))
 
 
 def button(text: str, callback: Callable | None = None, primary: bool = False, symbol: str = "") -> QPushButton:
     result = QPushButton(text)
     result.setCursor(Qt.CursorShape.PointingHandCursor)
+    # 2026-10-13：本次修改原因：危险/幽灵按钮样式统一；名称、回调和禁用条件保持原样。
+    if any(word in text for word in ("删除", "移除", "清空", "清除")):
+        result.setObjectName("danger")
+    # elif text in {"操作帮助", "采集路线设置", "查看回传记录", "回传记录"}:
+    # 2026-10-13：本次修改原因：帮助中的查看回传记录与其他跳转按钮统一描边样式，保留原回调。
+    elif text in {"操作帮助", "采集路线设置", "回传记录"}:
+        result.setObjectName("quiet")
     if primary:
         result.setObjectName("primary")
     if symbol:
@@ -90,6 +144,8 @@ class TaskSignals(QObject):
     # 2026-10-10：本次修改原因：携带任务标识，将后台完成事件明确交由主窗口的 Qt 槽处理。
     finished = Signal(object, object)
     failed = Signal(object, str)
+    # 2026-10-12：本次修改原因：进度携带任务身份，完成后到达的旧进度不会覆盖新任务或结束状态。
+    progress = Signal(object, dict)
 
 
 class Task(QRunnable):

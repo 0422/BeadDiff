@@ -6,12 +6,18 @@ from dataclasses import asdict
 # from PySide6.QtCore import Qt
 # 2026-10-11：本次修改原因：延迟更新缩略图并支持打开已采集的视频链接。
 from PySide6.QtCore import Qt, QTimer, QUrl
-from PySide6.QtGui import QDesktopServices
+ # from PySide6.QtGui import QDesktopServices
+# 2026-10-13：本次修改原因：Ctrl+S 复用保存修改，编辑器布局使用独立显示偏好。
+from PySide6.QtGui import QDesktopServices, QShortcut, QKeySequence
+from PySide6.QtCore import QSettings
+from .layout_support import PersistentSplitter, Panel, save_splitters
 from PySide6.QtNetwork import QNetworkAccessManager
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QFormLayout, QHBoxLayout, QHeaderView, QInputDialog,
     QLineEdit, QMessageBox, QPlainTextEdit, QScrollArea, QTableWidget, QTableWidgetItem,
     QTabWidget, QVBoxLayout, QWidget, QAbstractItemView,
+    # 2026-10-12：本次修改原因：滚动表单由内部最小尺寸约束撑开，避免表格与后续控件重叠。
+    QLayout,
 )
 
 # from ..models import Product, SKU, positive_decimal
@@ -20,10 +26,14 @@ from ..models import Product, SKU, positive_decimal, valid_url
 from ..storage import Repository
 # from .widgets import ImagePreview, button, label
 # 2026-10-11：本次修改原因：编辑页增加图片分组缩略图与来源 SKU 信息展示。
-from .widgets import ImageGallery, ImagePreview, button, label
+# from .widgets import ImageGallery, ImagePreview, button, label
+# 2026-10-13：本次修改原因：属性与图片栏目改为完整分区卡片，表格不再嵌在错位的标签列中。
+from .widgets import ImageGallery, ImagePreview, button, label, card
 # 2026-10-11：本次修改原因：按妙手八个栏目组织编辑器，图文详情和图片排序使用独立控件。
 from ..content import attribute_description, detail_html, sku_image_groups, with_detail_images
 from .media_list import MediaList
+# from .table_support import configure_table
+from .table_support import configure_table, fit_table_rows
 from .rich_description import RichDescription
 
 # 2026-10-11：本次修改原因：字段就地 AI 入口复用公共服务，生成结果先应用到表单，再由原保存流程版本化。
@@ -33,6 +43,8 @@ from ..ai.service import AIService
 from ..assets import valid_media_url
 from .ai_runner import TaskHub
 from .ai_workspace import AIWorkspace
+# 2026-10-12：本次修改原因：字段 AI 缺少有效配置时可就地打开共用模型设置。
+from .model_settings import ModelSettingsDialog
 # 2026-10-12：本次修改原因：共用字段限制和表单差异保护，标题/AI 文案修改不连带改写原始详情及 SKU 元数据。
 # from ..miaoshou_mapping import draft_limit_issues, preserve_unedited_form
 # 2026-10-12：本次修改原因：主图实时数量和审核反馈使用相同上限，格式校验统一交给保存/审核服务。
@@ -69,7 +81,22 @@ class ProductEditor(QDialog):
         if product.erp_imported:
             root.addWidget(label(f"妙手 API 导入 · 原商品 ID {product.erp_original_id} · 金额单位 CNY · 未编辑的远端字段完整保留", "hint", True))
         self.tabs = QTabWidget()
-        root.addWidget(self.tabs, 1)
+        # root.addWidget(self.tabs, 1)
+        # 2026-10-13：本次修改原因：字段与图片/AI候选分栏，不恢复商品列表速览，不改变保存和应用边界。
+        self.editor_splitter = PersistentSplitter(Qt.Orientation.Horizontal, "ui/editor/form_preview_splitter_v1", [780, 340], self)
+        self.tabs.setMinimumWidth(560)
+        self.editor_splitter.addWidget(self.tabs)
+        self.preview_area = QWidget()
+        self.preview_layout = QVBoxLayout(self.preview_area)
+        self.preview_layout.setContentsMargins(0, 0, 0, 0)
+        self.edit_preview = ImagePreview(network, 220)
+        self.preview_layout.addWidget(self.edit_preview)
+        self.preview_layout.addWidget(label("预览当前主图；字段旁的 AI 按钮在此展开候选。应用后仍需保存。", "hint", True))
+        self.preview_layout.addStretch()
+        self.preview_panel = Panel("图片预览 / AI 候选", self.preview_area)
+        self.editor_splitter.addWidget(self.preview_panel)
+        root.addWidget(self.editor_splitter, 1)
+        self.ai_workspace = None
         self.fields: dict[str, QLineEdit] = {}
         # self._basic_tab()
         # self._images_tab(network)
@@ -82,12 +109,23 @@ class ProductEditor(QDialog):
         self._certification_tab()
         self._logistics_tab()
         self._source_tab()
+        # 2026-10-12：本次修改原因：加工阶段提前说明本机图片上传边界及 AI 应用后仍需保存。
+        self.edit_feedback = label("AI 结果应用后需保存商品；本机白底图及生成图回传前需转换为公网链接。", "hint", True)
+        root.addWidget(self.edit_feedback)
         footer = QHBoxLayout()
-        footer.addWidget(button("检查完整性", self.check))
+        # footer.addWidget(button("检查完整性", self.check))
+        # 2026-10-13：本次修改原因：右侧候选展开期间锁住检查和保存，保持原模态窗口的操作范围。
+        self.check_button = button("检查完整性", self.check)
+        footer.addWidget(self.check_button)
         footer.addStretch()
         footer.addWidget(button("取消", self.reject))
-        footer.addWidget(button("保存修改", lambda: self.save_product(False)))
-        footer.addWidget(button("保存并审核", lambda: self.save_product(True), primary=True))
+        # footer.addWidget(button("保存修改", lambda: self.save_product(False)))
+        # footer.addWidget(button("保存并审核", lambda: self.save_product(True), primary=True))
+        # 2026-10-13：本次修改原因：AI 候选打开时维持原弹窗锁定语义，避免生成中提交表单。
+        self.save_button = button("保存修改", lambda: self.save_product(False))
+        self.approve_save_button = button("保存并审核", lambda: self.save_product(True), primary=True)
+        footer.addWidget(self.save_button)
+        footer.addWidget(self.approve_save_button)
         root.addLayout(footer)
         for editor in self.findChildren(QLineEdit):
             if not editor.isReadOnly():
@@ -103,6 +141,17 @@ class ProductEditor(QDialog):
         self.images.textChanged.connect(self.mark_dirty)
         self.detail_images.textChanged.connect(self.mark_dirty)
         self.tabs.currentChanged.connect(lambda _index: self.refresh_sku_images())
+        # 2026-10-13：本次修改原因：预览不触发字段修改；标签页与快捷键仅复用现有编辑入口。
+        # 2026-10-13：本次修改原因：预览复用现有异步图片接口，不生成或存储新商品字段。
+        self.edit_preview.set_url(product.images[0] if product.images else "")
+        self.images.textChanged.connect(self.update_edit_preview)
+        self.save_shortcut = QShortcut(QKeySequence("Ctrl+S"), self)
+        self.save_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self.save_shortcut.activated.connect(self.save_button.click)
+        self.editor_preferences = QSettings("BeadDiff", "BeadDiff")
+        tab = self.editor_preferences.value("ui/editor/current_tab", 0)
+        if isinstance(tab, int) and 0 <= tab < self.tabs.count():
+            self.tabs.setCurrentIndex(tab)
         self.dirty = False
         # 2026-10-11：本次修改原因：记录表单初始显示内容，避免描述回退和 SKU 币种规范化把直接保存误判为人工修改。
         try:
@@ -113,21 +162,49 @@ class ProductEditor(QDialog):
         except ValueError:
             self.initial_form_content = None
 
+    # 2026-10-13：本次修改原因：主图地址变化仅刷新异步预览，不参与审核或保存判断。
+    def update_edit_preview(self):
+        urls = self.images.toPlainText().splitlines()
+        self.edit_preview.set_url(urls[0] if urls else "")
+
     def mark_dirty(self, *_args) -> None:
         self.dirty = True
+        # 2026-10-12：本次修改原因：手动和 AI 操作均明确显示未保存状态。
+        if hasattr(self, "edit_feedback"):
+            self.edit_feedback.setText("有未保存修改。保存修改形成新版本；保存并审核后才可检查回传条件。")
 
     def _tab_form(self, title: str) -> QFormLayout:
         contents = QWidget()
+        # 2026-10-13：本次修改原因：明确表单内容白底，滚动区域不再露出 Qt 默认灰色底板。
+        contents.setObjectName("editorForm")
         form = QFormLayout(contents)
         form.setContentsMargins(24, 24, 24, 24)
         form.setSpacing(16)
         form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop)
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        # 2026-10-12：本次修改原因：内部控件高度不足时滚动，不压缩表格和图片工具栏相互覆盖。
+        form.setSizeConstraint(QLayout.SizeConstraint.SetMinAndMaxSize)
+        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setWidget(contents)
         self.tabs.addTab(scroll, title)
         return form
+
+    # 2026-10-13：本次修改原因：复杂表格/图片整块独占栏目宽度，顶部对齐且由外层统一滚动。
+    def _section_page(self, title: str) -> QVBoxLayout:
+        contents = QWidget()
+        contents.setObjectName("editorForm")
+        layout = QVBoxLayout(contents)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(18)
+        layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        layout.setSizeConstraint(QLayout.SizeConstraint.SetMinAndMaxSize)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(contents)
+        self.tabs.addTab(scroll, title)
+        return layout
 
     def _field(self, key: str, placeholder: str = "", readonly: bool = False) -> QLineEdit:
         editor = QLineEdit(str(getattr(self.product, key)))
@@ -156,7 +233,8 @@ class ProductEditor(QDialog):
         self.ai_field(form, "简易描述", self.simple_description, "simple_description")
         form.addRow("", button("从产品属性更新简易描述", self.describe_attributes))
         # 2026-10-11：本次修改原因：说明简易描述与 22 列模板的映射边界，避免编辑后误以为会单列导出。
-        form.addRow("", label("简易描述单独保存在本地；当前模板没有简易描述列，产品属性导出到“自定义属性”，图文详情导出到“详情描述”。", "hint", True))
+        # 2026-10-12：本次修改原因：撤下表格路线，说明简述和详情的独立加工及回传。
+        form.addRow("", label("简易描述与图文详情分别保存并回传，可独立手动或 AI 修改。", "hint", True))
         html = self.product.description_html
         if not html and "description_html" not in self.product.manual_fields:
             legacy_text = self.product.description if "description" in self.product.manual_fields else ""
@@ -169,25 +247,56 @@ class ProductEditor(QDialog):
         form.addRow("", button("用详情图更新图文描述", self.describe_images))
 
     # 2026-10-11：本次修改原因：产品属性按妙手的名称/值两列编辑，而非仅展示一段文字。
+    # def _attribute_tab(self) -> None:
+    #     form = self._tab_form("产品属性")
+    #     form.addRow("类目路径", self._field("category", "来源类目；发布时仍需匹配目标渠道类目"))
+    #     self.attribute_table = QTableWidget(0, 2)
+    #     self.attribute_table.setHorizontalHeaderLabels(["属性名称", "属性值"])
+    #     self.attribute_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+    #     self.attribute_table.setAlternatingRowColors(True)
+    #     self.attribute_table.verticalHeader().setDefaultSectionSize(44)
+    #     self.attribute_table.setMinimumHeight(380)
+    #     # 2026-10-12：本次修改原因：属性值及行号统一字体安全高度，单元格输入框不继承大表单内边距。
+    #     configure_table(self.attribute_table)
+    #     form.addRow(self.attribute_table)
+    #     for name, value in self.product.attributes.items():
+    #         self.add_attribute(name, value)
+    #     self.attribute_count = label(f"产品属性（{self.attribute_table.rowCount()} 项）")
+    #     # form.addRow(self.attribute_count, self.attribute_table)
+    #     # 2026-10-12：本次修改原因：属性表独占整行，属性数放在工具栏以免窄屏标签挤压表格。
+    #     actions = QHBoxLayout()
+    #     actions.addWidget(self.attribute_count)
+    #     actions.addWidget(button("新增属性", lambda: self.add_attribute()))
+    #     actions.addWidget(button("移除选中", self.remove_attributes))
+    #     actions.addStretch()
+    #     form.addRow("", actions)
+    #     form.addRow("", label("材料、颜色、长度和包装请按实物核对；串珠 BOM 约束仍需后续实现。", "hint", True))
+
+    # 2026-10-13：本次修改原因：属性区以标题、完整表格和工具栏分层，短表按行数收起空白；不再固定 380px 高度。
     def _attribute_tab(self) -> None:
-        form = self._tab_form("产品属性")
-        form.addRow("类目路径", self._field("category", "来源类目；发布时仍需匹配目标渠道类目"))
+        layout = self._section_page("产品属性")
+        frame, contents = card()
+        category = QHBoxLayout()
+        category.addWidget(label("类目路径", "hint"))
+        category.addWidget(self._field("category", "来源类目；发布时仍需匹配目标渠道类目"), 1)
+        contents.addLayout(category)
+        heading = QHBoxLayout()
+        heading.addWidget(label("产品属性", "sectionTitle"), 1)
+        self.attribute_count = label("0 项", "muted")
+        heading.addWidget(self.attribute_count)
+        heading.addWidget(button("新增属性", lambda: self.add_attribute()))
+        heading.addWidget(button("移除所选", self.remove_attributes))
+        contents.addLayout(heading)
         self.attribute_table = QTableWidget(0, 2)
         self.attribute_table.setHorizontalHeaderLabels(["属性名称", "属性值"])
         self.attribute_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        self.attribute_table.setAlternatingRowColors(True)
-        self.attribute_table.verticalHeader().setDefaultSectionSize(44)
-        self.attribute_table.setMinimumHeight(380)
+        configure_table(self.attribute_table)
+        fit_table_rows(self.attribute_table, maximum_rows=10)
+        contents.addWidget(self.attribute_table)
         for name, value in self.product.attributes.items():
             self.add_attribute(name, value)
-        self.attribute_count = label(f"产品属性（{self.attribute_table.rowCount()} 项）")
-        form.addRow(self.attribute_count, self.attribute_table)
-        actions = QHBoxLayout()
-        actions.addWidget(button("新增属性", lambda: self.add_attribute()))
-        actions.addWidget(button("移除选中", self.remove_attributes))
-        actions.addStretch()
-        form.addRow("", actions)
-        form.addRow("", label("材料、颜色、长度和包装请按实物核对；串珠 BOM 约束仍需后续实现。", "hint", True))
+        contents.addWidget(label("双击编辑；长内容可右键完整编辑。材料、颜色、长度和包装请按实物核对，串珠 BOM 约束仍需后续实现。", "hint", True))
+        layout.addWidget(frame)
 
     def add_attribute(self, name: str = "", value: str = "") -> None:
         row = self.attribute_table.rowCount()
@@ -237,26 +346,97 @@ class ProductEditor(QDialog):
         self.mark_dirty()
 
     # 2026-10-11：本次修改原因：主图支持顺序维护和尺寸核对，SKU 图片按销售属性分组展示。
+    # def _miaoshou_images_tab(self) -> None:
+    #     form = self._tab_form("产品图片")
+    #     # self.images = MediaList(self.product.images, self.product.image_sizes)
+    #     # 2026-10-11：本次修改原因：商品图片支持本地上传和单图 AI，套图仍保持可排序图片组。
+    #     assets = self.ai_service.assets if self.ai_service else None
+    #     # self.images = MediaList(self.product.images, self.product.image_sizes, assets, enable_ai=True)
+    #     # 2026-10-12：本次修改原因：原有超限列表打开即显示 16 / 15，手动粘贴、上传和 AI 套图后实时更新。
+    #     self.images = MediaList(self.product.images, self.product.image_sizes, assets, enable_ai=True, maximum=MAX_MAIN_IMAGES)
+    #     self.images.aiRequested.connect(lambda address: self.open_ai("image", "images", address))
+    #     self.product_gallery = ImageGallery(self.network)
+    #     self.product_gallery.enable_ai = True
+    #     self.product_gallery.aiRequested.connect(lambda address: self.open_ai("image", "images", address))
+    #     # 2026-10-11：本次修改原因：预览返回实际图片尺寸，补齐源材料未提供的尺寸显示。
+    #     self.product_gallery.sizeLoaded.connect(self.images.update_size)
+    #     form.addRow("产品图片 *", self.images)
+    #     form.addRow("", button("AI 生成套图", lambda: self.open_ai("image_set", "images")))
+    #     # form.addRow("", label("第一张为主图，可上移/下移调整顺序；像素尺寸仅显示采集材料的明确值。", "hint", True))
+    #     # 2026-10-12：本次修改原因：明确整个产品图片列表最多 15 张，不只第一张主图受限，不自动删图。
+    #     form.addRow("", label(f"产品图片最多 {MAX_MAIN_IMAGES} 张，第一张为主图，可上移/下移排序；超限须先移除或调整图片用途才能保存。", "hint", True))
+    #     form.addRow("", self.product_gallery)
+    #     self.sku_group_dimension = QComboBox()
+    #     self.sku_group_dimension.addItems([self.fields["spec1_name"].text(), self.fields["spec2_name"].text()])
+    #     color_index = next((index for index, name in enumerate(
+    #         [self.product.spec1_name, self.product.spec2_name]) if "颜色" in name or "color" in name.lower()), 0)
+    #     self.sku_group_dimension.setCurrentIndex(color_index)
+    #     self.sku_group = QComboBox()
+    #     group_actions = QHBoxLayout()
+    #     group_actions.addWidget(label("分组维度"))
+    #     group_actions.addWidget(self.sku_group_dimension)
+    #     group_actions.addWidget(self.sku_group, 1)
+    #     form.addRow("SKU 图片", group_actions)
+    #     self.sku_group_count = label("", "muted", True)
+    #     form.addRow("", self.sku_group_count)
+    #     self.sku_group_gallery = ImageGallery(self.network)
+    #     form.addRow("", self.sku_group_gallery)
+    #     self.sku_group_table = QTableWidget(0, 2)
+    #     self.sku_group_table.setHorizontalHeaderLabels(["对应 SKU 规格", "SKU 图片链接"])
+    #     self.sku_group_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+    #     self.sku_group_table.setMinimumHeight(155)
+    #     # 2026-10-12：本次修改原因：分组图片表原先使用 Qt 默认行高，导致图片链接和行号被全局 padding 裁切。
+    #     configure_table(self.sku_group_table)
+    #     self.sku_group_table.itemChanged.connect(self.group_image_changed)
+    #     form.addRow("", self.sku_group_table)
+    #     self.sku_group_dimension.currentIndexChanged.connect(lambda _index: self.refresh_sku_images())
+    #     self.sku_group.currentIndexChanged.connect(lambda _index: self.render_sku_group())
+    #     # self.detail_images = MediaList(self.product.detail_images, self.product.image_sizes)
+    #     # 2026-10-11：本次修改原因：详情图同样可上传和 AI 修改，并同步已有正文中的对应图。
+    #     self.detail_images = MediaList(self.product.detail_images, self.product.image_sizes, assets, enable_ai=True)
+    #     self.detail_images.aiRequested.connect(lambda address: self.open_ai("image", "detail_images", address))
+    #     self.detail_gallery = ImageGallery(self.network)
+    #     self.detail_gallery.enable_ai = True
+    #     self.detail_gallery.aiRequested.connect(lambda address: self.open_ai("image", "detail_images", address))
+    #     self.detail_gallery.sizeLoaded.connect(self.detail_images.update_size)
+    #     form.addRow("详情图片", self.detail_images)
+    #     form.addRow("", self.detail_gallery)
+    #     form.addRow("产品尺码表", self._field("size_chart", "产品尺码表图片链接"))
+    #     form.addRow("身体尺码表", self._field("body_size_chart", "身体尺寸对照图片链接"))
+    #     form.addRow("", label("SKU 图片与销售属性表双向同步；编辑详情图列表后，可在基本信息中更新图文描述。", "hint", True))
+    #     self.gallery_timer = QTimer(self)
+    #     self.gallery_timer.setSingleShot(True)
+    #     self.gallery_timer.setInterval(500)
+    #     self.gallery_timer.timeout.connect(self.refresh_galleries)
+    #     self.images.textChanged.connect(lambda: self.gallery_timer.start())
+    #     self.detail_images.textChanged.connect(lambda: self.gallery_timer.start())
+    #     self.refresh_galleries()
+    #     self.refresh_sku_images()
+    #
+    # # 2026-10-11：本次修改原因：从正在编辑的 SKU 行计算选项和分组，保存前即能核对。
+
+    # 2026-10-13：本次修改原因：主图、SKU 图片、详情图、尺码表分别以完整卡片排列，统一左边界及底部背景。
     def _miaoshou_images_tab(self) -> None:
-        form = self._tab_form("产品图片")
-        # self.images = MediaList(self.product.images, self.product.image_sizes)
-        # 2026-10-11：本次修改原因：商品图片支持本地上传和单图 AI，套图仍保持可排序图片组。
+        layout = self._section_page("产品图片")
         assets = self.ai_service.assets if self.ai_service else None
-        # self.images = MediaList(self.product.images, self.product.image_sizes, assets, enable_ai=True)
-        # 2026-10-12：本次修改原因：原有超限列表打开即显示 16 / 15，手动粘贴、上传和 AI 套图后实时更新。
+        frame, contents = card()
+        heading = QHBoxLayout()
+        heading.addWidget(label("产品主图", "sectionTitle"), 1)
+        heading.addWidget(button("AI 生成套图", lambda: self.open_ai("image_set", "images")))
+        contents.addLayout(heading)
+        contents.addWidget(label(f"最多 {MAX_MAIN_IMAGES} 张，第一张为主图。选中后上移 / 下移；超限请调整后再保存。", "hint", True))
         self.images = MediaList(self.product.images, self.product.image_sizes, assets, enable_ai=True, maximum=MAX_MAIN_IMAGES)
         self.images.aiRequested.connect(lambda address: self.open_ai("image", "images", address))
+        contents.addWidget(self.images)
         self.product_gallery = ImageGallery(self.network)
         self.product_gallery.enable_ai = True
         self.product_gallery.aiRequested.connect(lambda address: self.open_ai("image", "images", address))
-        # 2026-10-11：本次修改原因：预览返回实际图片尺寸，补齐源材料未提供的尺寸显示。
         self.product_gallery.sizeLoaded.connect(self.images.update_size)
-        form.addRow("产品图片 *", self.images)
-        form.addRow("", button("AI 生成套图", lambda: self.open_ai("image_set", "images")))
-        # form.addRow("", label("第一张为主图，可上移/下移调整顺序；像素尺寸仅显示采集材料的明确值。", "hint", True))
-        # 2026-10-12：本次修改原因：明确整个产品图片列表最多 15 张，不只第一张主图受限，不自动删图。
-        form.addRow("", label(f"产品图片最多 {MAX_MAIN_IMAGES} 张，第一张为主图，可上移/下移排序；超限须先移除或调整图片用途才能保存。", "hint", True))
-        form.addRow("", self.product_gallery)
+        contents.addWidget(self.product_gallery)
+        layout.addWidget(frame)
+
+        frame, contents = card()
+        contents.addWidget(label("SKU 规格图片", "sectionTitle"))
         self.sku_group_dimension = QComboBox()
         self.sku_group_dimension.addItems([self.fields["spec1_name"].text(), self.fields["spec2_name"].text()])
         color_index = next((index for index, name in enumerate(
@@ -264,35 +444,48 @@ class ProductEditor(QDialog):
         self.sku_group_dimension.setCurrentIndex(color_index)
         self.sku_group = QComboBox()
         group_actions = QHBoxLayout()
-        group_actions.addWidget(label("分组维度"))
+        group_actions.addWidget(label("分组维度", "hint"))
         group_actions.addWidget(self.sku_group_dimension)
         group_actions.addWidget(self.sku_group, 1)
-        form.addRow("SKU 图片", group_actions)
+        contents.addLayout(group_actions)
         self.sku_group_count = label("", "muted", True)
-        form.addRow("", self.sku_group_count)
-        self.sku_group_gallery = ImageGallery(self.network)
-        form.addRow("", self.sku_group_gallery)
+        contents.addWidget(self.sku_group_count)
         self.sku_group_table = QTableWidget(0, 2)
-        self.sku_group_table.setHorizontalHeaderLabels(["对应 SKU 规格", "SKU 图片链接"])
-        self.sku_group_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        self.sku_group_table.setMinimumHeight(155)
+        self.sku_group_table.setHorizontalHeaderLabels(["对应 SKU 规格", "图片链接"])
+        self.sku_group_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
+        self.sku_group_table.setColumnWidth(0, 200)
+        self.sku_group_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        configure_table(self.sku_group_table)
+        fit_table_rows(self.sku_group_table, maximum_rows=6)
         self.sku_group_table.itemChanged.connect(self.group_image_changed)
-        form.addRow("", self.sku_group_table)
+        contents.addWidget(self.sku_group_table)
+        self.sku_group_gallery = ImageGallery(self.network)
+        contents.addWidget(self.sku_group_gallery)
         self.sku_group_dimension.currentIndexChanged.connect(lambda _index: self.refresh_sku_images())
         self.sku_group.currentIndexChanged.connect(lambda _index: self.render_sku_group())
-        # self.detail_images = MediaList(self.product.detail_images, self.product.image_sizes)
-        # 2026-10-11：本次修改原因：详情图同样可上传和 AI 修改，并同步已有正文中的对应图。
+        layout.addWidget(frame)
+
+        frame, contents = card()
+        contents.addWidget(label("详情图片", "sectionTitle"))
+        contents.addWidget(label("详情图列表与正文分别保存；在基本信息点击“用详情图更新图文描述”同步到正文。", "hint", True))
         self.detail_images = MediaList(self.product.detail_images, self.product.image_sizes, assets, enable_ai=True)
         self.detail_images.aiRequested.connect(lambda address: self.open_ai("image", "detail_images", address))
+        contents.addWidget(self.detail_images)
         self.detail_gallery = ImageGallery(self.network)
         self.detail_gallery.enable_ai = True
         self.detail_gallery.aiRequested.connect(lambda address: self.open_ai("image", "detail_images", address))
         self.detail_gallery.sizeLoaded.connect(self.detail_images.update_size)
-        form.addRow("详情图片", self.detail_images)
-        form.addRow("", self.detail_gallery)
-        form.addRow("产品尺码表", self._field("size_chart", "产品尺码表图片链接"))
-        form.addRow("身体尺码表", self._field("body_size_chart", "身体尺寸对照图片链接"))
-        form.addRow("", label("SKU 图片与销售属性表双向同步；编辑详情图列表后，可在基本信息中更新图文描述。", "hint", True))
+        contents.addWidget(self.detail_gallery)
+        layout.addWidget(frame)
+
+        frame, contents = card()
+        contents.addWidget(label("尺码表", "sectionTitle"))
+        sizes = QFormLayout()
+        sizes.addRow("产品尺码表", self._field("size_chart", "产品尺码表图片链接"))
+        sizes.addRow("身体尺码表", self._field("body_size_chart", "身体尺寸对照图片链接"))
+        sizes.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        contents.addLayout(sizes)
+        layout.addWidget(frame)
         self.gallery_timer = QTimer(self)
         self.gallery_timer.setSingleShot(True)
         self.gallery_timer.setInterval(500)
@@ -301,8 +494,6 @@ class ProductEditor(QDialog):
         self.detail_images.textChanged.connect(lambda: self.gallery_timer.start())
         self.refresh_galleries()
         self.refresh_sku_images()
-
-    # 2026-10-11：本次修改原因：从正在编辑的 SKU 行计算选项和分组，保存前即能核对。
     def current_sku_images(self) -> list[SKU]:
         result = []
         for row in range(self.sku_table.rowCount()):
@@ -401,13 +592,15 @@ class ProductEditor(QDialog):
         form.addRow("", button("打开认证文件", lambda: self.open_attachment("certificate")))
         form.addRow("说明书 PDF", self._field("instruction_manual", "说明书 PDF 链接"))
         form.addRow("", button("打开说明书", lambda: self.open_attachment("instruction_manual")))
-        form.addRow("", label("采集材料未提供的附件留空。说明书在本地保存，当前 22 列模板没有对应列。", "hint", True))
+        # 2026-10-12：本次修改原因：附件说明改为 ERP 接口及公网素材要求。
+        form.addRow("", label("未提供的附件留空；回传附件需使用可访问的网络链接。身体尺码表尚未适配回传。", "hint", True))
 
     def _logistics_tab(self) -> None:
         form = self._tab_form("物流信息")
         form.addRow("包裹重量 KG", self._field("package_weight", "填写实测重量，例如 0.35"))
         form.addRow("包裹尺寸 CM", self._field("package_dimensions", "长*宽*高，例如 30*20*3"))
-        form.addRow("", label("商品级包裹信息保存在本地。现有模板提供的是 SKU 重量/尺寸，请在销售属性逐 SKU 核实填写。", "hint", True))
+        # 2026-10-12：本次修改原因：物流按商品及 SKU 分别核实，使用接口回传。
+        form.addRow("", label("商品与 SKU 包装重量、尺寸分别核实填写，回传前统一检查数值和单位。", "hint", True))
 
     def _source_tab(self) -> None:
         form = self._tab_form("货源链接")
@@ -422,7 +615,8 @@ class ProductEditor(QDialog):
         # form.addRow("", label("单规格新增必须有货源价。优先使用这里的金额，否则读取已确认币种的采集货源价；销售金额不会代填货源价。", "hint", True))
         # 2026-10-12：本次修改原因：多 SKU 新增也必须有独立商品价，API 导入则已读取妙手的货源价。
         form.addRow("", label("新增商品必须有独立货源价，单规格可读取币种明确的采集货源价。SKU 销售金额不会代填；API 导入的货源价为人民币。", "hint", True))
-        form.addRow("", label("货源备注在本地保存，现有 22 列模板没有对应列。", "hint", True))
+        # 2026-10-12：本次修改原因：货源备注已使用接口回传，不再引用模板列。
+        form.addRow("", label("货源链接与备注可随商品回传；新增商品必须填写独立货源价，SKU 售价不能代填。", "hint", True))
 
     def open_attachment(self, key: str) -> None:
         url = self.fields[key].text().strip()
@@ -439,7 +633,8 @@ class ProductEditor(QDialog):
         self.currency.setEditable(True)
         self.currency.addItems(["", "USD", "CNY", "EUR", "GBP", "JPY", "CAD", "AUD"])
         self.currency.setCurrentText(self.product.currency)
-        self.currency.setToolTip("选择实际导出售价使用的币种，不会自动执行汇率换算")
+        # 2026-10-12：本次修改原因：售价币种与人民币回传换算说明一致。
+        self.currency.setToolTip("选择实际报价币种，回传时使用设置中已确认的人民币汇率")
         form.addRow("售价币种 *", self.currency)
         form.addRow("货源链接", self._field("source_url", "https://…"))
         form.addRow("来源商品 ID", self._field("source_id", readonly=True))
@@ -506,9 +701,13 @@ class ProductEditor(QDialog):
 
     def _sku_tab(self) -> None:
         page = QWidget()
+        # 2026-10-13：本次修改原因：销售属性页使用统一白底，表格完整边框与栏目背景保持一致。
+        page.setObjectName("editorForm")
         layout = QVBoxLayout(page)
         layout.setContentsMargins(20, 18, 20, 18)
         layout.setSpacing(12)
+        # 2026-10-13：本次修改原因：销售属性和其他分区一样顶部排列，不让剩余高度拉伸表格卡片形成底部空矩形。
+        layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         # layout.addWidget(label("采集价仅作参考，不自动转成售价；库存、重量未提供时请留空。", "warning", True))
         # 2026-10-11：本次修改原因：区分来源库存与自有库存，规格尺码与物流包装尺寸。
         # layout.addWidget(label("来源价仅供参考；来源库存、限购不自动转成自有库存。包装重量、尺寸需自行核实。", "warning", True))
@@ -549,6 +748,11 @@ class ProductEditor(QDialog):
         self.sku_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.sku_table.setAlternatingRowColors(True)
         self.sku_table.verticalHeader().setDefaultSectionSize(48)
+        # 2026-10-12：本次修改原因：销售属性行、行号和双击输入框使用同一套安全几何。
+        configure_table(self.sku_table)
+        # self.sku_table.setMinimumHeight(210)
+        # 2026-10-13：本次修改原因：少量 SKU 按完整行数展示，避免表底部行号灰条和多余空白。
+        fit_table_rows(self.sku_table, maximum_rows=8)
         self.sku_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         # for col, width in enumerate([155, 100, 100, 130, 95, 85, 95, 110, 190, 180]):
         for col, width in enumerate([160, 150, 160, 110, 95, 95, 115, 140, 190, 180, 90, 90, 90, 90]):
@@ -560,7 +764,12 @@ class ProductEditor(QDialog):
         header.moveSection(header.visualIndex(10), 4)
         for sku in self.product.skus:
             self.add_sku(sku)
-        layout.addWidget(self.sku_table, 1)
+        # layout.addWidget(self.sku_table, 1)
+        # 2026-10-13：本次修改原因：销售属性表独立包在完整卡片内，缩放时表底边框保持对齐。
+        frame, table_layout = card()
+        table_layout.setContentsMargins(12, 12, 12, 12)
+        table_layout.addWidget(self.sku_table)
+        layout.addWidget(frame)
         self.sku_preview = ImagePreview(self.network, 110)
         self.sku_preview.setFixedWidth(165)
         preview_row = QHBoxLayout()
@@ -584,7 +793,13 @@ class ProductEditor(QDialog):
         # self.tabs.addTab(page, f"规格与定价（{len(self.product.skus)}）")
         # self.sku_tab_index = self.tabs.addTab(page, f"规格与定价（{len(self.product.skus)}）")
         # 2026-10-11：本次修改原因：销售属性栏目与妙手命名一致。
-        self.sku_tab_index = self.tabs.addTab(page, f"销售属性（{len(self.product.skus)}）")
+        # self.sku_tab_index = self.tabs.addTab(page, f"销售属性（{len(self.product.skus)}）")
+        # 2026-10-12：本次修改原因：销售属性整页可滚动，小窗口不压缩表格、提示和 SKU 预览产生重叠。
+        layout.setSizeConstraint(QLayout.SizeConstraint.SetMinAndMaxSize)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(page)
+        self.sku_tab_index = self.tabs.addTab(scroll, f"销售属性（{len(self.product.skus)}）")
         self.fields["spec1_name"].textChanged.connect(self.refresh_spec_options)
         self.fields["spec2_name"].textChanged.connect(self.refresh_spec_options)
         self.refresh_spec_options()
@@ -631,6 +846,11 @@ class ProductEditor(QDialog):
         values.append(sku.source_sku_id)
         for col, value in enumerate(values):
             item = QTableWidgetItem(value)
+            # 2026-10-13：本次修改原因：数字右对齐、币种居中、文本左对齐，提升规格表横向比较可读性。
+            if col in {3, 4, 5, 6, 11, 12}:
+                item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            elif col in {10, 13}:
+                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             # if col in {3, 9}:
             # if col in {3, 9, 10, 11, 12, 13}:
             if col in {3, 9, 10, 11, 12, 13, 14}:
@@ -763,6 +983,13 @@ class ProductEditor(QDialog):
         if not self.ai_service:
             QMessageBox.information(self, "AI 配置", "请从商品工作台打开编辑器，并在设置 → AI 模型中完成配置。")
             return
+        # 2026-10-12：本次修改原因：缺少有效类别配置时先引导配置，避免进入 AI 面板后无模型可选。
+        category = "image" if operation in {"image", "image_set"} else "text"
+        if not any(profile.category == category and not profile.problems() for profile in self.ai_service.config.profiles):
+            QMessageBox.information(self, "请先配置 AI 模型", "接下来打开模型设置，请新增对应类别的配置并设为当前。")
+            ModelSettingsDialog(self.ai_service.config, self.ai_service.assets, self.ai_hub, self).exec()
+            if not any(profile.category == category and not profile.problems() for profile in self.ai_service.config.profiles):
+                return
         try:
             snapshot = self.collect().to_dict()
         except ValueError as error:
@@ -776,7 +1003,59 @@ class ProductEditor(QDialog):
         if target == "sku":
             workspace.count.setValue(1)
             workspace.application.setVisible(False)
-        if workspace.exec() != QDialog.DialogCode.Accepted:
+        # if workspace.exec() != QDialog.DialogCode.Accepted:
+        #     return
+        # 2026-10-13：本次修改原因：复用原 AI 工作区为右侧内嵌候选；冻结目标和表单，finished 后仍执行原应用代码。
+        self.ai_workspace = workspace
+        workspace.setWindowFlags(Qt.WindowType.Widget)
+        workspace.setMinimumSize(0, 0)
+        self.edit_preview.hide()
+        for index in range(1, self.preview_layout.count()):
+            item = self.preview_layout.itemAt(index)
+            if item.widget():
+                item.widget().hide()
+        self.preview_layout.insertWidget(0, workspace, 1)
+        # self.preview_area.show()
+        # self.preview_panel.collapse.setText("收起")
+        # 2026-10-13：本次修改原因：AI 入口展开默认收起的辅助分区，退出时恢复原来的收起状态和宽度。
+        self.ai_normal_sizes = self.editor_splitter.sizes()
+        self.ai_preview_was_expanded = not self.preview_area.isHidden()
+        self.editor_splitter.save_layout()
+        self.editor_splitter.transient = True
+        self.preview_panel.set_expanded(True, persist=False)
+        # 2026-10-13：本次修改原因：区域放大按钮已撤下，AI 展开不再操作该按钮。
+        # self.preview_panel.maximize.setEnabled(False)
+        self.tabs.setEnabled(False)
+        self.check_button.setEnabled(False)
+        self.save_button.setEnabled(False)
+        self.approve_save_button.setEnabled(False)
+        # 2026-10-13：本次修改原因：AI展开比例是临时呈现，关闭后恢复原表单/预览比例。
+        # self.ai_normal_sizes = self.editor_splitter.sizes()
+        # self.editor_splitter.save_layout()
+        # self.editor_splitter.transient = True
+        self.editor_splitter.setSizes([600, 660])
+        workspace.closed.connect(lambda result: self.finish_ai_workspace(workspace, result, operation, target, address, sku_row))
+        workspace.show()
+
+    def finish_ai_workspace(self, workspace, result, operation, target, address, sku_row):
+        self.preview_layout.removeWidget(workspace)
+        self.ai_workspace = None
+        self.editor_splitter.transient = False
+        # 2026-10-13：本次修改原因：恢复进入 AI 前的辅助区可见状态，不因临时 AI 布局改变默认收起偏好。
+        self.preview_panel.set_expanded(self.ai_preview_was_expanded, persist=False)
+        self.editor_splitter.setSizes(self.ai_normal_sizes)
+        self.tabs.setEnabled(True)
+        self.check_button.setEnabled(True)
+        self.save_button.setEnabled(True)
+        self.approve_save_button.setEnabled(True)
+        # self.preview_panel.maximize.setEnabled(True)
+        self.edit_preview.show()
+        for index in range(self.preview_layout.count()):
+            item = self.preview_layout.itemAt(index)
+            if item.widget():
+                item.widget().show()
+        workspace.deleteLater()
+        if result != QDialog.DialogCode.Accepted:
             return
         if operation == "title":
             self.fields["title"].setText(workspace.applied_text)
@@ -822,6 +1101,8 @@ class ProductEditor(QDialog):
                     for asset in workspace.result.assets:
                         media.update_size(asset.uri, asset.width, asset.height)
         self.mark_dirty()
+        # 2026-10-12：本次修改原因：应用候选只改变表单，明确提示保存和审核下一步。
+        self.edit_feedback.setText("AI 结果已应用到当前字段，尚未保存。请核对后保存修改或保存并审核。")
 
     def replace_description_image(self, address: str, values: list[str]):
         html = self.rich_description.html()
@@ -850,7 +1131,19 @@ class ProductEditor(QDialog):
         self.dirty = False
         self.accept()
 
+    # 2026-10-13：本次修改原因：保存显示布局；AI 抽屉沿用原等待任务完成保护，取消先关闭候选。
+    def done(self, result):
+        if self.ai_workspace is not None:
+            self.edit_feedback.setText("请先在右侧关闭或应用 AI 候选，再保存或退出编辑。")
+            return
+        save_splitters(self)
+        self.editor_preferences.setValue("ui/editor/current_tab", self.tabs.currentIndex())
+        super().done(result)
+
     def reject(self) -> None:
+        if self.ai_workspace is not None:
+            self.ai_workspace.reject()
+            return
         if self.dirty and QMessageBox.question(self, "未保存的修改", "关闭后将丢弃本次未保存的修改。是否关闭？",
                                               QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
                                               QMessageBox.StandardButton.Cancel) != QMessageBox.StandardButton.Discard:
