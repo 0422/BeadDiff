@@ -5,7 +5,9 @@ from dataclasses import asdict
 
 # from PySide6.QtCore import Qt
 # 2026-10-11：本次修改原因：延迟更新缩略图并支持打开已采集的视频链接。
-from PySide6.QtCore import Qt, QTimer, QUrl
+# from PySide6.QtCore import Qt, QTimer, QUrl
+# 2026-10-13：本次修改原因：商品编辑改为页面，通过信号返回列表，不运行模态事件循环。
+from PySide6.QtCore import Qt, QTimer, QUrl, Signal, QEvent
  # from PySide6.QtGui import QDesktopServices
 # 2026-10-13：本次修改原因：Ctrl+S 复用保存修改，编辑器布局使用独立显示偏好。
 from PySide6.QtGui import QDesktopServices, QShortcut, QKeySequence
@@ -19,6 +21,11 @@ from PySide6.QtWidgets import (
     # 2026-10-12：本次修改原因：滚动表单由内部最小尺寸约束撑开，避免表格与后续控件重叠。
     QLayout,
 )
+# 2026-10-13：本次修改原因：页面顶部使用矢量返回图标，保持高 DPI 和主题切换清晰。
+from PySide6.QtCore import QSize
+from PySide6.QtWidgets import QToolButton
+from .widgets import icon
+from .theme import theme_tokens
 
 # from ..models import Product, SKU, positive_decimal
 # 2026-10-10：本次修改原因：预览前限制图片链接协议为 HTTP/HTTPS。
@@ -43,8 +50,17 @@ from ..ai.service import AIService
 from ..assets import valid_media_url
 from .ai_runner import TaskHub
 from .ai_workspace import AIWorkspace
+ # 2026-10-13：本次修改原因：统一模式页和原子应用草稿，复用已保存爆款方案。
+# from PySide6.QtWidgets import QStackedWidget, QTabBar
+# 2026-10-13：本次修改原因：商品身份文本可缩短显示，确保返回和模式切换始终可见。
+from PySide6.QtWidgets import QStackedWidget, QTabBar, QSizePolicy
+from ..ai.references import ReferenceStore
+from ..ai.workflow import apply_changes
+from .ai_workbench import AIWorkbench
 # 2026-10-12：本次修改原因：字段 AI 缺少有效配置时可就地打开共用模型设置。
-from .model_settings import ModelSettingsDialog
+# from .model_settings import ModelSettingsDialog
+# 2026-10-14：本次修改原因：业务页面不再打开模型设置弹窗。
+# 模型配置统一从设置页进入。
 # 2026-10-12：本次修改原因：共用字段限制和表单差异保护，标题/AI 文案修改不连带改写原始详情及 SKU 元数据。
 # from ..miaoshou_mapping import draft_limit_issues, preserve_unedited_form
 # 2026-10-12：本次修改原因：主图实时数量和审核反馈使用相同上限，格式校验统一交给保存/审核服务。
@@ -58,44 +74,115 @@ def text_editor(text: str = "", placeholder: str = "", height: int = 100) -> QPl
     return editor
 
 
-class ProductEditor(QDialog):
+# class ProductEditor(QDialog):
+# 2026-10-13：本次修改原因：编辑内容直接加入主窗口页面栈，保存和取消仍使用原校验与结果代码。
+class ProductEditor(QWidget):
+    closed = Signal(int)
+    accepted = Signal()
+    rejected = Signal()
     # def __init__(self, repository: Repository, product: Product, network: QNetworkAccessManager, parent=None):
     # 2026-10-11：本次修改原因：两条来源共用模型服务与后台任务，兼容现有编辑器构造方式。
+    # def __init__(self, repository: Repository, product: Product, network: QNetworkAccessManager, parent=None,
+    #              ai_service: AIService | None = None, ai_hub: TaskHub | None = None):
+    # 2026-10-13：本次修改原因：新增共享方案库参数，现有调用参数兼容。
     def __init__(self, repository: Repository, product: Product, network: QNetworkAccessManager, parent=None,
-                 ai_service: AIService | None = None, ai_hub: TaskHub | None = None):
+                 ai_service: AIService | None = None, ai_hub: TaskHub | None = None, reference_store=None):
         super().__init__(parent)
         self.repository, self.product, self.dirty = repository, product, False
         # 2026-10-11：本次修改原因：SKU 预览复用主窗口的异步图片连接。
         self.network = network
         self.ai_service = ai_service
         self.ai_hub = ai_hub or TaskHub(self)
+        # 2026-10-13：本次修改原因：统一 AI 工作区延迟创建，不把 Prompt 编辑误标成商品已修改。
+        self.reference_store = reference_store or (ReferenceStore(ai_service.config.path.parent) if ai_service else None)
+        self.ai_workbench = None
         self.setWindowTitle(f"编辑商品 · {product.main_code}")
-        self.resize(1120, 790)
-        self.setMinimumSize(940, 650)
+        # self.resize(1120, 790)
+        # self.setMinimumSize(940, 650)
+        # 2026-10-13：本次修改原因：编辑页跟随主内容区大小，不再要求独立窗口尺寸。
+        self.setObjectName("productEditorPage")
+        self._finished = False
         root = QVBoxLayout(self)
-        root.setContentsMargins(26, 22, 26, 20)
-        root.setSpacing(16)
-        root.addWidget(label("商品编辑", "pageTitle"))
-        root.addWidget(label(f"{product.source.upper()} · {product.source_id} · {product.site or '站点未提供'}    /    当前版本 v{product.revision}", "muted"))
+        # root.setContentsMargins(26, 22, 26, 20)
+        # root.setSpacing(16)
+        # root.addWidget(label("商品编辑", "pageTitle"))
+        # root.addWidget(label(f"{product.source.upper()} · {product.source_id} · {product.site or '站点未提供'}    /    当前版本 v{product.revision}", "muted"))
+        # 2026-10-13：本次修改原因：返回入口与商品身份同一行展示，主表单保留更多可用高度。
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(12)
+        heading = QHBoxLayout()
+        self.back_button = QToolButton()
+        self.back_button.setObjectName("editorBack")
+        self.back_button.setIcon(icon("back", theme_tokens()["text"]))
+        self.back_button.setIconSize(QSize(20, 20))
+        self.back_button.setFixedSize(36, 36)
+        self.back_button.setToolTip("返回商品列表")
+        self.back_button.setAccessibleName("返回商品列表")
+        self.back_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.back_button.clicked.connect(self.reject)
+        heading.addWidget(self.back_button)
+        heading.addWidget(label("商品编辑", "sectionTitle"))
+        identity = label(f"{product.main_code} · {product.source.upper()} · {product.site or '站点未提供'} · v{product.revision}", "muted")
+        # identity.setToolTip(f"货源 ID：{product.source_id}")
+        # 2026-10-13：本次修改原因：长商品编号不撑宽页面，完整信息可通过悬停查看。
+        identity.setToolTip(identity.text() + f"\n货源 ID：{product.source_id}")
+        identity.setMinimumWidth(0)
+        identity.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        heading.addWidget(identity, 1)
+        # 2026-10-13：本次修改原因：单一模式切换代替每个字段的 AI 按钮，返回列表入口保持原位。
+        self.mode_tabs = QTabBar()
+        self.mode_tabs.setObjectName("editorModeTabs")
+        self.mode_tabs.addTab("手动修改")
+        self.mode_tabs.addTab("AI 处理")
+        self.mode_tabs.setExpanding(False)
+        # self.mode_tabs.setDrawBase(False)
+        # self.mode_tabs.currentChanged.connect(self.switch_mode)
+        # 2026-10-13：本次修改原因：模式切换只有两项，保持完整文字并撤下滚动箭头，防止样式生效后 AI 入口被挤住。
+        self.mode_tabs.setDrawBase(False)
+        self.mode_tabs.setUsesScrollButtons(False)
+        self.mode_tabs.setElideMode(Qt.TextElideMode.ElideNone)
+        # self.mode_tabs.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
+        # self.mode_tabs.currentChanged.connect(self.switch_mode)
+        # 2026-10-13：本次修改原因：按已生效样式预留两个标签及边距，消除 Qt 标签尺寸取整造成的边缘裁切。
+        self.mode_tabs.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
+        self.mode_tabs.ensurePolished()
+        self.mode_tabs.setMinimumWidth(self.mode_tabs.sizeHint().width() + 8)
+        self.mode_tabs.currentChanged.connect(self.switch_mode)
+        heading.addWidget(self.mode_tabs)
+        root.addLayout(heading)
         # 2026-10-12：本次修改原因：显示 API 来源及人民币单位，帮助用户区分旧插件自解析商品。
         if product.erp_imported:
             root.addWidget(label(f"妙手 API 导入 · 原商品 ID {product.erp_original_id} · 金额单位 CNY · 未编辑的远端字段完整保留", "hint", True))
         self.tabs = QTabWidget()
         # root.addWidget(self.tabs, 1)
         # 2026-10-13：本次修改原因：字段与图片/AI候选分栏，不恢复商品列表速览，不改变保存和应用边界。
-        self.editor_splitter = PersistentSplitter(Qt.Orientation.Horizontal, "ui/editor/form_preview_splitter_v1", [780, 340], self)
-        self.tabs.setMinimumWidth(560)
-        self.editor_splitter.addWidget(self.tabs)
-        self.preview_area = QWidget()
-        self.preview_layout = QVBoxLayout(self.preview_area)
-        self.preview_layout.setContentsMargins(0, 0, 0, 0)
-        self.edit_preview = ImagePreview(network, 220)
-        self.preview_layout.addWidget(self.edit_preview)
-        self.preview_layout.addWidget(label("预览当前主图；字段旁的 AI 按钮在此展开候选。应用后仍需保存。", "hint", True))
-        self.preview_layout.addStretch()
-        self.preview_panel = Panel("图片预览 / AI 候选", self.preview_area)
-        self.editor_splitter.addWidget(self.preview_panel)
-        root.addWidget(self.editor_splitter, 1)
+        # self.editor_splitter = PersistentSplitter(Qt.Orientation.Horizontal, "ui/editor/form_preview_splitter_v1", [780, 340], self)
+        # self.tabs.setMinimumWidth(560)
+        # 2026-10-13：本次修改原因：取消常驻图片预览区，平时表单全宽，点击 AI 后才显示右侧工作区。
+        # self.editor_splitter = PersistentSplitter(Qt.Orientation.Horizontal, "ui/editor/form_ai_splitter_v2", [620, 480], self)
+        # self.tabs.setMinimumWidth(420)
+        # self.editor_splitter.addWidget(self.tabs)
+        # self.preview_area = QWidget()
+        # self.preview_layout = QVBoxLayout(self.preview_area)
+        # self.preview_layout.setContentsMargins(0, 0, 0, 0)
+        # self.edit_preview = ImagePreview(network, 220)
+        # self.preview_layout.addWidget(self.edit_preview)
+        # self.preview_layout.addWidget(label("预览当前主图；字段旁的 AI 按钮在此展开候选。应用后仍需保存。", "hint", True))
+        # self.preview_layout.addStretch()
+        # self.preview_panel = Panel("图片预览 / AI 候选", self.preview_area)
+        # self.editor_splitter.addWidget(self.preview_panel)
+        # 2026-10-13：本次修改原因：AI 容器无预览占位、无额外折叠标题，关闭 AI 后完全让出宽度。
+        # self.ai_area = QWidget()
+        # self.ai_area.setMinimumWidth(440)
+        # self.ai_layout = QVBoxLayout(self.ai_area)
+        # self.ai_layout.setContentsMargins(0, 0, 0, 0)
+        # self.editor_splitter.addWidget(self.ai_area)
+        # self.ai_area.hide()
+        # root.addWidget(self.editor_splitter, 1)
+        # 2026-10-13：本次修改原因：手动表单/AI 使用全宽页面，高 DPI 下不再压缩为狭窄抽屉。
+        self.mode_stack = QStackedWidget()
+        self.mode_stack.addWidget(self.tabs)
+        root.addWidget(self.mode_stack, 1)
         self.ai_workspace = None
         self.fields: dict[str, QLineEdit] = {}
         # self._basic_tab()
@@ -111,8 +198,19 @@ class ProductEditor(QDialog):
         self._source_tab()
         # 2026-10-12：本次修改原因：加工阶段提前说明本机图片上传边界及 AI 应用后仍需保存。
         self.edit_feedback = label("AI 结果应用后需保存商品；本机白底图及生成图回传前需转换为公网链接。", "hint", True)
+        # 2026-10-14：本次修改原因：本机素材状态单独显示，不被未保存或 AI 应用成功提示覆盖。
+        self.local_media_hint = label("", "warning", True)
+        self.local_media_hint.hide()
+        # self.local_media_hint.setToolTip("先将本机图片或附件托管为公网链接，再在商品对应栏目替换链接、保存审核。软件尚未自动托管。")
+        # 2026-10-14：本次修改原因：图片已在同步 ERP 前由图床流程自动托管，附件类素材仍需单独检查公网要求。
+        self.local_media_hint.setToolTip("采用的本机图片会在同步 ERP 前自动托管并替换为新公网链接；视频、认证附件和说明书仍需按对应字段补充可访问链接。设置 → 图床可检测与重试。")
+        root.addWidget(self.local_media_hint)
         root.addWidget(self.edit_feedback)
-        footer = QHBoxLayout()
+        # footer = QHBoxLayout()
+        # 2026-10-13：本次修改原因：AI 模式仅展示生成/应用操作，商品保存留在手动核对页面。
+        self.manual_footer = QWidget()
+        footer = QHBoxLayout(self.manual_footer)
+        footer.setContentsMargins(0, 0, 0, 0)
         # footer.addWidget(button("检查完整性", self.check))
         # 2026-10-13：本次修改原因：右侧候选展开期间锁住检查和保存，保持原模态窗口的操作范围。
         self.check_button = button("检查完整性", self.check)
@@ -126,7 +224,8 @@ class ProductEditor(QDialog):
         self.approve_save_button = button("保存并审核", lambda: self.save_product(True), primary=True)
         footer.addWidget(self.save_button)
         footer.addWidget(self.approve_save_button)
-        root.addLayout(footer)
+        # root.addLayout(footer)
+        root.addWidget(self.manual_footer)
         for editor in self.findChildren(QLineEdit):
             if not editor.isReadOnly():
                 editor.textChanged.connect(self.mark_dirty)
@@ -143,8 +242,8 @@ class ProductEditor(QDialog):
         self.tabs.currentChanged.connect(lambda _index: self.refresh_sku_images())
         # 2026-10-13：本次修改原因：预览不触发字段修改；标签页与快捷键仅复用现有编辑入口。
         # 2026-10-13：本次修改原因：预览复用现有异步图片接口，不生成或存储新商品字段。
-        self.edit_preview.set_url(product.images[0] if product.images else "")
-        self.images.textChanged.connect(self.update_edit_preview)
+        # self.edit_preview.set_url(product.images[0] if product.images else "")
+        # self.images.textChanged.connect(self.update_edit_preview)
         self.save_shortcut = QShortcut(QKeySequence("Ctrl+S"), self)
         self.save_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
         self.save_shortcut.activated.connect(self.save_button.click)
@@ -162,16 +261,65 @@ class ProductEditor(QDialog):
         except ValueError:
             self.initial_form_content = None
 
+        # 2026-10-14：本次修改原因：打开已有本机图的商品时立即显示回传条件，且不标记商品已修改。
+        self.refresh_local_media_hint()
+
     # 2026-10-13：本次修改原因：主图地址变化仅刷新异步预览，不参与审核或保存判断。
-    def update_edit_preview(self):
-        urls = self.images.toPlainText().splitlines()
-        self.edit_preview.set_url(urls[0] if urls else "")
+    # def update_edit_preview(self):
+    #     urls = self.images.toPlainText().splitlines()
+    #     self.edit_preview.set_url(urls[0] if urls else "")
+
+    # 2026-10-13：本次修改原因：返回图标随应用主题更新；其他字段和编辑行为不变。
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() in (QEvent.Type.PaletteChange, QEvent.Type.StyleChange) and hasattr(self, "back_button"):
+            self.back_button.setIcon(icon("back", theme_tokens()["text"]))
+
+    # 2026-10-14：本次修改原因：只读取图片和附件控件，其他字段尚未填完时也能正确提示本机素材。
+    def refresh_local_media_hint(self):
+        from ..content import description_images
+        addresses = self.images.toPlainText().splitlines() + self.detail_images.toPlainText().splitlines()
+        addresses += description_images(self.rich_description.html())
+        addresses += [self.sku_table.item(row, 8).text() for row in range(self.sku_table.rowCount())
+                      if self.sku_table.item(row, 8)]
+        addresses += [self.fields[name].text() for name in (
+            "video", "certificate", "size_chart", "body_size_chart", "instruction_manual") if name in self.fields]
+        count = len({address.strip() for address in addresses if address.strip().startswith("file:")})
+        # self.local_media_hint.setText(f"当前商品含 {count} 项本机素材：可预览和保存；回传前须托管并替换为 HTTP/HTTPS 链接，自动托管尚未接入。" if count else "")
+        # 2026-10-14：本次修改原因：提示与当前图片自动上传、附件单独校验的链路保持一致。
+        self.local_media_hint.setText(
+            f"当前商品含 {count} 项本机素材：保存并审核后，同步 ERP 时会自动托管采用的图片并替换为新 HTTP/HTTPS 链接；视频、认证附件和说明书请在对应栏目补充公网链接。" if count else "")
+        self.local_media_hint.setVisible(bool(count))
 
     def mark_dirty(self, *_args) -> None:
         self.dirty = True
         # 2026-10-12：本次修改原因：手动和 AI 操作均明确显示未保存状态。
         if hasattr(self, "edit_feedback"):
+            # self.edit_feedback.setText("有未保存修改。保存修改形成新版本；保存并审核后才可检查回传条件。")
+            # 2026-10-14：本次修改原因：修改或应用图片后实时保留本机素材回传提示，不被成功提示覆盖。
             self.edit_feedback.setText("有未保存修改。保存修改形成新版本；保存并审核后才可检查回传条件。")
+        if hasattr(self, "local_media_hint"):
+            self.refresh_local_media_hint()
+
+    # 2026-10-14：本次修改原因：主编号缺失时给出来源与补填方式，仅由用户点击填入且不覆盖已有编号。
+    def refresh_main_code_help(self, *_args):
+        empty = not self.fields["main_code"].text().strip()
+        source_id = self.product.source_id.strip()
+        imported_empty = self.product.erp_imported and not self.product.main_code
+        explanation = "妙手导入时未提供产品主编号。" if imported_empty else "当前产品主编号为空。"
+        self.main_code_help.setText(explanation + "新增商品前需补全；来源商品 ID 与妙手商品 ID 是不同字段。")
+        self.main_code_help.setVisible(empty)
+        self.fill_main_code_button.setVisible(empty and bool(source_id))
+        self.fill_main_code_button.setEnabled(bool(source_id) and len(source_id) <= 255)
+        self.fill_main_code_button.setToolTip(f"将来源商品 ID「{source_id}」填入主编号，仅修改当前草稿，保存后生效。")
+
+    def fill_main_code_from_source(self):
+        field = self.fields["main_code"]
+        source_id = self.product.source_id.strip()
+        if field.text().strip() or not source_id or len(source_id) > 255:
+            return
+        field.setText(source_id)
+        field.setFocus()
 
     def _tab_form(self, title: str) -> QFormLayout:
         contents = QWidget()
@@ -223,7 +371,19 @@ class ProductEditor(QDialog):
         self.ai_field(form, "产品标题 *", self._field("title", "填写面向销售渠道的产品标题"), "title")
         # 2026-10-12：本次修改原因：编辑时就显示公共采集箱文本上限，AI 输出保存前使用同样校验。
         form.addRow("", label("公共采集箱：标题最多 255 字符，简述最多 65536 字符，详细描述 HTML 最多 100000 字符。", "hint", True))
-        form.addRow("产品主编号 *", self._field("main_code", "同一商品的 SKU 共用一个产品主编号"))
+        # form.addRow("产品主编号 *", self._field("main_code", "同一商品的 SKU 共用一个产品主编号"))
+        # 2026-10-14：本次修改原因：主编号为空时解释原始数据并提供主动补填入口，不在导入或 AI 应用中自动改编号。
+        code_row = QWidget()
+        code_layout = QHBoxLayout(code_row)
+        code_layout.setContentsMargins(0, 0, 0, 0)
+        code_layout.addWidget(self._field("main_code", "同一商品的 SKU 共用一个产品主编号"), 1)
+        self.fill_main_code_button = button("使用来源商品 ID 填入", self.fill_main_code_from_source)
+        code_layout.addWidget(self.fill_main_code_button)
+        form.addRow("产品主编号 *", code_row)
+        self.main_code_help = label("", "warning", True)
+        form.addRow("", self.main_code_help)
+        self.fields["main_code"].textChanged.connect(self.refresh_main_code_help)
+        self.refresh_main_code_help()
         simple = self.product.simple_description
         if not simple and "simple_description" not in self.product.manual_fields:
             simple = attribute_description(self.product.attributes)
@@ -243,7 +403,8 @@ class ProductEditor(QDialog):
         # form.addRow("详细描述", self.rich_description)
         # 2026-10-11：本次修改原因：详情支持 AI 文案与其中单张图片处理。
         self.ai_field(form, "详细描述", self.rich_description, "description_html")
-        self.rich_description.aiRequested.connect(lambda address: self.open_ai("image", "html", address))
+        # self.rich_description.aiRequested.connect(lambda address: self.open_ai("image", "html", address))
+        # 2026-10-13：本次修改原因：详情正文图片在统一 AI 页选择，手动表单取消分散的 AI 入口。
         form.addRow("", button("用详情图更新图文描述", self.describe_images))
 
     # 2026-10-11：本次修改原因：产品属性按妙手的名称/值两列编辑，而非仅展示一段文字。
@@ -422,15 +583,18 @@ class ProductEditor(QDialog):
         frame, contents = card()
         heading = QHBoxLayout()
         heading.addWidget(label("产品主图", "sectionTitle"), 1)
-        heading.addWidget(button("AI 生成套图", lambda: self.open_ai("image_set", "images")))
+        # heading.addWidget(button("AI 生成套图", lambda: self.open_ai("image_set", "images")))
+        # 2026-10-13：本次修改原因：生成套图移入统一 AI 模式。
         contents.addLayout(heading)
         contents.addWidget(label(f"最多 {MAX_MAIN_IMAGES} 张，第一张为主图。选中后上移 / 下移；超限请调整后再保存。", "hint", True))
-        self.images = MediaList(self.product.images, self.product.image_sizes, assets, enable_ai=True, maximum=MAX_MAIN_IMAGES)
-        self.images.aiRequested.connect(lambda address: self.open_ai("image", "images", address))
+        # self.images = MediaList(self.product.images, self.product.image_sizes, assets, enable_ai=True, maximum=MAX_MAIN_IMAGES)
+        # self.images.aiRequested.connect(lambda address: self.open_ai("image", "images", address))
+        # 2026-10-13：本次修改原因：保留手动图片管理和数量限制，改图入口统一。
+        self.images = MediaList(self.product.images, self.product.image_sizes, assets, maximum=MAX_MAIN_IMAGES)
         contents.addWidget(self.images)
         self.product_gallery = ImageGallery(self.network)
-        self.product_gallery.enable_ai = True
-        self.product_gallery.aiRequested.connect(lambda address: self.open_ai("image", "images", address))
+        # self.product_gallery.enable_ai = True
+        # self.product_gallery.aiRequested.connect(lambda address: self.open_ai("image", "images", address))
         self.product_gallery.sizeLoaded.connect(self.images.update_size)
         contents.addWidget(self.product_gallery)
         layout.addWidget(frame)
@@ -468,12 +632,14 @@ class ProductEditor(QDialog):
         frame, contents = card()
         contents.addWidget(label("详情图片", "sectionTitle"))
         contents.addWidget(label("详情图列表与正文分别保存；在基本信息点击“用详情图更新图文描述”同步到正文。", "hint", True))
-        self.detail_images = MediaList(self.product.detail_images, self.product.image_sizes, assets, enable_ai=True)
-        self.detail_images.aiRequested.connect(lambda address: self.open_ai("image", "detail_images", address))
+        # self.detail_images = MediaList(self.product.detail_images, self.product.image_sizes, assets, enable_ai=True)
+        # self.detail_images.aiRequested.connect(lambda address: self.open_ai("image", "detail_images", address))
+        # 2026-10-13：本次修改原因：详情图片保留手动列表，AI 统一选择目标。
+        self.detail_images = MediaList(self.product.detail_images, self.product.image_sizes, assets)
         contents.addWidget(self.detail_images)
         self.detail_gallery = ImageGallery(self.network)
-        self.detail_gallery.enable_ai = True
-        self.detail_gallery.aiRequested.connect(lambda address: self.open_ai("image", "detail_images", address))
+        # self.detail_gallery.enable_ai = True
+        # self.detail_gallery.aiRequested.connect(lambda address: self.open_ai("image", "detail_images", address))
         self.detail_gallery.sizeLoaded.connect(self.detail_images.update_size)
         contents.addWidget(self.detail_gallery)
         layout.addWidget(frame)
@@ -777,7 +943,8 @@ class ProductEditor(QDialog):
         self.sku_source_summary = label("选择 SKU 查看规格图片和来源库存信息。", "hint", True)
         preview_row.addWidget(self.sku_source_summary, 1)
         # 2026-10-11：本次修改原因：SKU 改图显式绑定所选规格，避免改动其他颜色的图片。
-        preview_row.addWidget(button("AI 改当前 SKU 图", self.open_sku_ai))
+        # preview_row.addWidget(button("AI 改当前 SKU 图", self.open_sku_ai))
+        # 2026-10-13：本次修改原因：SKU 改图在统一 AI 模式按规格选择，原 SKU 表保留。
         layout.addLayout(preview_row)
         self.sku_table.itemSelectionChanged.connect(self.preview_sku)
         self.sku_table.itemChanged.connect(self.sku_item_changed)
@@ -952,7 +1119,9 @@ class ProductEditor(QDialog):
             # 2026-10-12：本次修改原因：手动或 AI 尚未保存的 HTML 以当前表单为准进行限制校验。
             issues = product.review_issues(self.product)
             if issues:
-                QMessageBox.warning(self, "商品尚需完善", "\n".join(f"• {issue}" for issue in issues[:30]))
+                # QMessageBox.warning(self, "商品尚需完善", "\n".join(f"• {issue}" for issue in issues[:30]))
+                # 2026-10-14：本次修改原因：检查弹窗提供补全位置。
+                QMessageBox.warning(self, "商品尚需完善", "\n".join(explain_issue(issue) for issue in issues[:30]))
             else:
                 QMessageBox.information(self, "检查通过", "必填字段和规格已通过检查。请核对商品真实性、售价及渠道要求后审核。")
         except ValueError as error:
@@ -966,143 +1135,333 @@ class ProductEditor(QDialog):
         heading = QHBoxLayout()
         heading.addWidget(label(caption))
         heading.addStretch()
-        heading.addWidget(button("AI 生成", lambda: self.open_ai(operation)))
+        # heading.addWidget(button("AI 生成", lambda: self.open_ai(operation)))
+        # 2026-10-13：本次修改原因：字段只保留手动编辑，统一模式选择需要生成的内容。
         layout.addLayout(heading)
         layout.addWidget(editor)
         form.addRow("", container)
 
-    def open_sku_ai(self):
-        row = self.sku_table.currentRow()
-        item = self.sku_table.item(row, 8) if row >= 0 else None
-        if not item:
-            QMessageBox.information(self, "请选择 SKU", "请先选择需要处理图片的 SKU。")
-            return
-        self.open_ai("image", "sku", item.text().strip(), row)
+    # 2026-10-13：本次修改原因：旧字段抽屉实现注释留档，由统一 AI 页面承担相同能力。
+    # def open_sku_ai(self):
+    #     row = self.sku_table.currentRow()
+    #     item = self.sku_table.item(row, 8) if row >= 0 else None
+    #     if not item:
+    #         QMessageBox.information(self, "请选择 SKU", "请先选择需要处理图片的 SKU。")
+    #         return
+    #     self.open_ai("image", "sku", item.text().strip(), row)
+    #
+    # def open_ai(self, operation: str, target: str = "images", address: str = "", sku_row: int = -1):
+    #     # 2026-10-13：本次修改原因：页面内只容纳一个目标字段的 AI 工作区，避免叠加候选覆盖目标。
+    #     if self.ai_workspace is not None:
+    #         return
+    #     if not self.ai_service:
+    #         QMessageBox.information(self, "AI 配置", "请从商品工作台打开编辑器，并在设置 → AI 模型中完成配置。")
+    #         return
+    #     # 2026-10-12：本次修改原因：缺少有效类别配置时先引导配置，避免进入 AI 面板后无模型可选。
+    #     category = "image" if operation in {"image", "image_set"} else "text"
+    #     if not any(profile.category == category and not profile.problems() for profile in self.ai_service.config.profiles):
+    #         QMessageBox.information(self, "请先配置 AI 模型", "接下来打开模型设置，请新增对应类别的配置并设为当前。")
+    #         ModelSettingsDialog(self.ai_service.config, self.ai_service.assets, self.ai_hub, self).exec()
+    #         if not any(profile.category == category and not profile.problems() for profile in self.ai_service.config.profiles):
+    #             return
+    #     try:
+    #         snapshot = self.collect().to_dict()
+    #     except ValueError as error:
+    #         QMessageBox.warning(self, "请检查商品事实", str(error))
+    #         return
+    #     # 2026-10-11：本次修改原因：SKU 改图只提供当前规格事实，避免其他颜色和尺寸混入。
+    #     if target == "sku" and 0 <= sku_row < len(snapshot.get("skus", [])):
+    #         snapshot["skus"] = [snapshot["skus"][sku_row]]
+    #     workspace = AIWorkspace(self.ai_service, self.ai_hub, snapshot, operation, self.network, address, self)
+    #     # 2026-10-11：本次修改原因：SKU 字段只能替换单图，候选默认只生成一张。
+    #     if target == "sku":
+    #         workspace.count.setValue(1)
+    #         workspace.application.setVisible(False)
+    #     # if workspace.exec() != QDialog.DialogCode.Accepted:
+    #     #     return
+    #     # 2026-10-13：本次修改原因：复用原 AI 工作区为右侧内嵌候选；冻结目标和表单，finished 后仍执行原应用代码。
+    #     self.ai_workspace = workspace
+    #     workspace.setWindowFlags(Qt.WindowType.Widget)
+    #     workspace.setMinimumSize(0, 0)
+    #     # self.edit_preview.hide()
+    #     # for index in range(1, self.preview_layout.count()):
+    #     #     item = self.preview_layout.itemAt(index)
+    #     #     if item.widget():
+    #     #         item.widget().hide()
+    #     # self.preview_layout.insertWidget(0, workspace, 1)
+    #     # 2026-10-13：本次修改原因：AI 独立工作区按需加入右栏，常规编辑不创建图片预览。
+    #     self.ai_layout.addWidget(workspace)
+    #     # self.preview_area.show()
+    #     # self.preview_panel.collapse.setText("收起")
+    #     # 2026-10-13：本次修改原因：AI 入口展开默认收起的辅助分区，退出时恢复原来的收起状态和宽度。
+    #     self.ai_normal_sizes = self.editor_splitter.sizes()
+    #     # self.ai_preview_was_expanded = not self.preview_area.isHidden()
+    #     self.editor_splitter.save_layout()
+    #     self.editor_splitter.transient = True
+    #     # self.preview_panel.set_expanded(True, persist=False)
+    #     self.ai_area.show()
+    #     # 2026-10-13：本次修改原因：区域放大按钮已撤下，AI 展开不再操作该按钮。
+    #     # self.preview_panel.maximize.setEnabled(False)
+    #     self.tabs.setEnabled(False)
+    #     self.check_button.setEnabled(False)
+    #     self.save_button.setEnabled(False)
+    #     self.approve_save_button.setEnabled(False)
+    #     # 2026-10-13：本次修改原因：AI展开比例是临时呈现，关闭后恢复原表单/预览比例。
+    #     # self.ai_normal_sizes = self.editor_splitter.sizes()
+    #     # self.editor_splitter.save_layout()
+    #     # self.editor_splitter.transient = True
+    #     # self.editor_splitter.setSizes([600, 660])
+    #     # 2026-10-13：本次修改原因：给 AI 表单保证可读宽度，不再沿用弹窗中的固定总宽度。
+    #     self.editor_splitter.setSizes([max(420, self.width() - 500), 480])
+    #     workspace.closed.connect(lambda result: self.finish_ai_workspace(workspace, result, operation, target, address, sku_row))
+    #     workspace.show()
+    #     workspace.instruction.setFocus()
+    #
+    # def finish_ai_workspace(self, workspace, result, operation, target, address, sku_row):
+    #     # self.preview_layout.removeWidget(workspace)
+    #     self.ai_layout.removeWidget(workspace)
+    #     self.ai_workspace = None
+    #     self.editor_splitter.transient = False
+    #     # 2026-10-13：本次修改原因：恢复进入 AI 前的辅助区可见状态，不因临时 AI 布局改变默认收起偏好。
+    #     # self.preview_panel.set_expanded(self.ai_preview_was_expanded, persist=False)
+    #     # 2026-10-13：本次修改原因：AI 退出后右侧工作区完全隐藏，不恢复已撤下的预览区域。
+    #     self.ai_area.hide()
+    #     self.editor_splitter.setSizes(self.ai_normal_sizes)
+    #     self.tabs.setEnabled(True)
+    #     self.check_button.setEnabled(True)
+    #     self.save_button.setEnabled(True)
+    #     self.approve_save_button.setEnabled(True)
+    #     # self.preview_panel.maximize.setEnabled(True)
+    #     # self.edit_preview.show()
+    #     # for index in range(self.preview_layout.count()):
+    #     #     item = self.preview_layout.itemAt(index)
+    #     #     if item.widget():
+    #     #         item.widget().show()
+    #     workspace.deleteLater()
+    #     if result != QDialog.DialogCode.Accepted:
+    #         return
+    #     if operation == "title":
+    #         self.fields["title"].setText(workspace.applied_text)
+    #     elif operation == "simple_description":
+    #         self.simple_description.setPlainText(workspace.applied_text)
+    #     elif operation == "description_html":
+    #         self.rich_description.set_html(workspace.applied_text)
+    #     elif workspace.applied_assets:
+    #         values = workspace.applied_assets
+    #         if target == "sku":
+    #             if len(values) != 1:
+    #                 QMessageBox.information(self, "SKU 图片", "一个 SKU 图片字段只能应用一张图，请从历史候选中勾选一张后应用。")
+    #                 return
+    #             self.sku_table.item(sku_row, 8).setText(values[0])
+    #         elif target == "html":
+    #             # self.replace_description_image(address, values)
+    #             # 2026-10-11：本次修改原因：详情正文按用户的替换/追加选择处理，同步对应详情图列表。
+    #             if workspace.apply_mode == "append":
+    #                 self.rich_description.set_html(self.rich_description.html() + detail_html("", values))
+    #                 self.detail_images.set_urls(self.detail_images.toPlainText().splitlines() + values)
+    #             else:
+    #                 self.replace_description_image(address, values)
+    #                 old = self.detail_images.toPlainText().splitlines()
+    #                 if address in old:
+    #                     index = old.index(address)
+    #                     self.detail_images.set_urls(old[:index] + values + old[index + 1:])
+    #             self.detail_images.textChanged.emit()
+    #         else:
+    #             media = self.detail_images if target == "detail_images" else self.images
+    #             old = media.toPlainText().splitlines()
+    #             if workspace.apply_mode == "replace_set":
+    #                 updated = values
+    #             elif workspace.apply_mode == "replace" and address in old:
+    #                 index = old.index(address)
+    #                 updated = old[:index] + values + old[index + 1:]
+    #             else:
+    #                 updated = old + values
+    #             media.set_urls(updated)
+    #             media.textChanged.emit()
+    #             if target == "detail_images" and workspace.apply_mode == "replace":
+    #                 self.replace_description_image(address, values)
+    #             if workspace.result:
+    #                 for asset in workspace.result.assets:
+    #                     media.update_size(asset.uri, asset.width, asset.height)
+    #     self.mark_dirty()
+    #     # 2026-10-12：本次修改原因：应用候选只改变表单，明确提示保存和审核下一步。
+    #     self.edit_feedback.setText("AI 结果已应用到当前字段，尚未保存。请核对后保存修改或保存并审核。")
 
-    def open_ai(self, operation: str, target: str = "images", address: str = "", sku_row: int = -1):
-        if not self.ai_service:
-            QMessageBox.information(self, "AI 配置", "请从商品工作台打开编辑器，并在设置 → AI 模型中完成配置。")
+    # 2026-10-13：本次修改原因：模式切换读取当前未保存草稿，候选保留在同一工作区实例。
+    # 2026-10-14：本次修改原因：白底图建档后启动整套 Listing，复用现有候选审核、原子应用与保存。
+    def start_white_listing(self, defaults):
+        from ..ai.product_plan import white_listing_draft
+        self.mode_tabs.setCurrentIndex(1)
+        if self.ai_workbench is None:
             return
-        # 2026-10-12：本次修改原因：缺少有效类别配置时先引导配置，避免进入 AI 面板后无模型可选。
-        category = "image" if operation in {"image", "image_set"} else "text"
-        if not any(profile.category == category and not profile.problems() for profile in self.ai_service.config.profiles):
-            QMessageBox.information(self, "请先配置 AI 模型", "接下来打开模型设置，请新增对应类别的配置并设为当前。")
-            ModelSettingsDialog(self.ai_service.config, self.ai_service.assets, self.ai_hub, self).exec()
-            if not any(profile.category == category and not profile.problems() for profile in self.ai_service.config.profiles):
-                return
+        workbench = self.ai_workbench
         try:
-            snapshot = self.collect().to_dict()
-        except ValueError as error:
-            QMessageBox.warning(self, "请检查商品事实", str(error))
+            draft = white_listing_draft(self.collect().to_dict(), defaults)
+            workbench.processing.save(draft)
+        except (ValueError, OSError) as error:
+            workbench.message(str(error))
             return
-        # 2026-10-11：本次修改原因：SKU 改图只提供当前规格事实，避免其他颜色和尺寸混入。
-        if target == "sku" and 0 <= sku_row < len(snapshot.get("skus", [])):
-            snapshot["skus"] = [snapshot["skus"][sku_row]]
-        workspace = AIWorkspace(self.ai_service, self.ai_hub, snapshot, operation, self.network, address, self)
-        # 2026-10-11：本次修改原因：SKU 字段只能替换单图，候选默认只生成一张。
-        if target == "sku":
-            workspace.count.setValue(1)
-            workspace.application.setVisible(False)
-        # if workspace.exec() != QDialog.DialogCode.Accepted:
-        #     return
-        # 2026-10-13：本次修改原因：复用原 AI 工作区为右侧内嵌候选；冻结目标和表单，finished 后仍执行原应用代码。
-        self.ai_workspace = workspace
-        workspace.setWindowFlags(Qt.WindowType.Widget)
-        workspace.setMinimumSize(0, 0)
-        self.edit_preview.hide()
-        for index in range(1, self.preview_layout.count()):
-            item = self.preview_layout.itemAt(index)
-            if item.widget():
-                item.widget().hide()
-        self.preview_layout.insertWidget(0, workspace, 1)
-        # self.preview_area.show()
-        # self.preview_panel.collapse.setText("收起")
-        # 2026-10-13：本次修改原因：AI 入口展开默认收起的辅助分区，退出时恢复原来的收起状态和宽度。
-        self.ai_normal_sizes = self.editor_splitter.sizes()
-        self.ai_preview_was_expanded = not self.preview_area.isHidden()
-        self.editor_splitter.save_layout()
-        self.editor_splitter.transient = True
-        self.preview_panel.set_expanded(True, persist=False)
-        # 2026-10-13：本次修改原因：区域放大按钮已撤下，AI 展开不再操作该按钮。
-        # self.preview_panel.maximize.setEnabled(False)
-        self.tabs.setEnabled(False)
-        self.check_button.setEnabled(False)
-        self.save_button.setEnabled(False)
-        self.approve_save_button.setEnabled(False)
-        # 2026-10-13：本次修改原因：AI展开比例是临时呈现，关闭后恢复原表单/预览比例。
-        # self.ai_normal_sizes = self.editor_splitter.sizes()
-        # self.editor_splitter.save_layout()
-        # self.editor_splitter.transient = True
-        self.editor_splitter.setSizes([600, 660])
-        workspace.closed.connect(lambda result: self.finish_ai_workspace(workspace, result, operation, target, address, sku_row))
-        workspace.show()
+        workbench.draft = draft
+        workbench._rendering = True
+        workbench.instruction.setPlainText(draft['options']['instruction'])
+        workbench._rendering = False
+        workbench.render()
+        workbench.generate()
 
-    def finish_ai_workspace(self, workspace, result, operation, target, address, sku_row):
-        self.preview_layout.removeWidget(workspace)
-        self.ai_workspace = None
-        self.editor_splitter.transient = False
-        # 2026-10-13：本次修改原因：恢复进入 AI 前的辅助区可见状态，不因临时 AI 布局改变默认收起偏好。
-        self.preview_panel.set_expanded(self.ai_preview_was_expanded, persist=False)
-        self.editor_splitter.setSizes(self.ai_normal_sizes)
-        self.tabs.setEnabled(True)
-        self.check_button.setEnabled(True)
-        self.save_button.setEnabled(True)
-        self.approve_save_button.setEnabled(True)
-        # self.preview_panel.maximize.setEnabled(True)
-        self.edit_preview.show()
-        for index in range(self.preview_layout.count()):
-            item = self.preview_layout.itemAt(index)
-            if item.widget():
-                item.widget().show()
-        workspace.deleteLater()
-        if result != QDialog.DialogCode.Accepted:
+    def switch_mode(self, index):
+        if self.ai_workbench and self.ai_workbench.busy:
+            self.mode_tabs.blockSignals(True)
+            self.mode_tabs.setCurrentIndex(1)
+            self.mode_tabs.blockSignals(False)
             return
-        if operation == "title":
-            self.fields["title"].setText(workspace.applied_text)
-        elif operation == "simple_description":
-            self.simple_description.setPlainText(workspace.applied_text)
-        elif operation == "description_html":
-            self.rich_description.set_html(workspace.applied_text)
-        elif workspace.applied_assets:
-            values = workspace.applied_assets
-            if target == "sku":
-                if len(values) != 1:
-                    QMessageBox.information(self, "SKU 图片", "一个 SKU 图片字段只能应用一张图，请从历史候选中勾选一张后应用。")
-                    return
-                self.sku_table.item(sku_row, 8).setText(values[0])
-            elif target == "html":
-                # self.replace_description_image(address, values)
-                # 2026-10-11：本次修改原因：详情正文按用户的替换/追加选择处理，同步对应详情图列表。
-                if workspace.apply_mode == "append":
-                    self.rich_description.set_html(self.rich_description.html() + detail_html("", values))
-                    self.detail_images.set_urls(self.detail_images.toPlainText().splitlines() + values)
-                else:
-                    self.replace_description_image(address, values)
-                    old = self.detail_images.toPlainText().splitlines()
-                    if address in old:
-                        index = old.index(address)
-                        self.detail_images.set_urls(old[:index] + values + old[index + 1:])
-                self.detail_images.textChanged.emit()
-            else:
-                media = self.detail_images if target == "detail_images" else self.images
-                old = media.toPlainText().splitlines()
-                if workspace.apply_mode == "replace_set":
-                    updated = values
-                elif workspace.apply_mode == "replace" and address in old:
-                    index = old.index(address)
-                    updated = old[:index] + values + old[index + 1:]
-                else:
-                    updated = old + values
-                media.set_urls(updated)
+        if index == 1:
+            try:
+                if not self.ai_service:
+                    raise ValueError("请先在设置中配置 AI 模型。")
+                snapshot = self.collect().to_dict()
+                # if self.ai_workbench is None:
+                #     self.ai_workbench = AIWorkbench
+                # 2026-10-13：本次修改原因：首次进入 AI 时承接手动页选中的图片，之后保留工作区状态。
+                first = self.ai_workbench is None
+                if first:
+                    self.ai_workbench = AIWorkbench(self.ai_service, self.ai_hub, self.reference_store, self.network, self)
+                    self.ai_workbench.applyRequested.connect(self.apply_ai_changes)
+                    self.ai_workbench.busyChanged.connect(self.ai_busy_changed)
+                    self.mode_stack.addWidget(self.ai_workbench)
+                # self.ai_workbench.set_product(snapshot)
+                # 2026-10-13：本次修改原因：从当前 SKU 或图片列表进入时直接定位处理目标。
+                self.ai_workbench.set_product(snapshot)
+                if first:
+                    self.seed_ai_selection(snapshot)
+            except ValueError as error:
+                self.edit_feedback.setText(str(error))
+                self.mode_tabs.blockSignals(True)
+                self.mode_tabs.setCurrentIndex(0)
+                self.mode_tabs.blockSignals(False)
+                return
+        self.mode_stack.setCurrentIndex(index)
+        self.manual_footer.setVisible(index == 0)
+        self.edit_feedback.setVisible(index == 0)
+
+    # 2026-10-13：本次修改原因：后台任务期间冻结切换与提交，避免请求仍使用旧商品快照。
+    # def ai_busy_changed(self, busy):
+    # 2026-10-13：本次修改原因：仅首次进入时承接选中的图片与 SKU，不增加分散的 AI 入口。
+    # def seed_ai_selection(self, snapshot):
+    #     workbench = self.ai_workbench
+    #     target, address = None, ""
+    #     if self.tabs.currentIndex() == 2:
+    #         row = self.sku_table.currentRow()
+    #         if 0 <= row < len(snapshot.get("skus", [])):
+    #             from ..ai.workflow import sku_locator
+    #             sku = snapshot["skus"][row]
+    #             target, address = {"field": "sku", "locator": sku_locator(sku)}, sku.get("image", "")
+    #     elif self.tabs.currentIndex() == 3:
+    #         for field, media in (("detail_images", self.detail_images), ("images", self.images)):
+    #             if media.table.selectionModel().selectedRows():
+    #                 item = media.table.item(media.table.currentRow(), 0)
+    #                 if item and item.text().strip():
+    #                     target, address = {"field": field}, item.text().strip()
+    #                     break
+    #     if target is None:
+    #         return
+    #     workbench._rendering = True
+    #     try:
+    #         index = next((i for i in range(workbench.target.count()) if workbench.target.itemData(i) == target), -1)
+    #         if index < 0:
+    #             return
+    #         workbench.target.setCurrentIndex(index)
+    #         workbench.anchor.setCurrentIndex(workbench.anchor.findData(address))
+    #         workbench.subjects.set_urls([address] if address else [])
+    #         for field, control in workbench.tasks.items():
+    #             control.setChecked(field == "images")
+    #     finally:
+    #         workbench._rendering = False
+    # 2026-10-14：本次修改原因：进入 AI 时定位分组，避免选中单张图后把处理范围误限为一张。
+    def seed_ai_selection(self, snapshot):
+        # 选择仅决定初始图片分组，整商品素材始终完整保留。
+        field, address, locator = "images", "", None
+        if self.tabs.currentIndex() == 2:
+            field = "sku"
+            row = self.sku_table.currentRow()
+            if 0 <= row < len(snapshot.get("skus", [])):
+                from ..ai.workflow import sku_locator
+                sku = snapshot["skus"][row]
+                address, locator = sku.get("image", ""), sku_locator(sku)
+        elif self.tabs.currentIndex() == 3:
+            for group, media in (("detail_images", self.detail_images), ("images", self.images)):
+                if media.table.selectionModel().selectedRows():
+                    field = group
+                    item = media.table.item(media.table.currentRow(), 0)
+                    address = item.text().strip() if item else ""
+                    break
+        self.ai_workbench.focus_target(field, address, locator)
+
+    # 2026-10-13：本次修改原因：后台任务期间禁止切换与提交，保护生成快照。
+    def ai_busy_changed(self, busy):
+        self.mode_tabs.setEnabled(not busy)
+        self.back_button.setEnabled(not busy)
+        self.check_button.setEnabled(not busy)
+        self.save_button.setEnabled(not busy)
+        self.approve_save_button.setEnabled(not busy)
+
+    # 2026-10-13：本次修改原因：先构建并校验完整补丁，再一次性应用选中字段；不修改审核或 ERP 状态。
+    def apply_ai_changes(self, changes):
+        if not self.ai_workbench or self.ai_workbench.busy:
+            return
+        try:
+            before = self.collect().to_dict()
+            updated = apply_changes(before, changes)
+        except (ValueError, TypeError, KeyError) as error:
+            self.ai_workbench.status.setText("未应用：" + str(error))
+            return
+        if before.get("title") != updated.get("title"):
+            self.fields["title"].setText(updated["title"])
+        if before.get("simple_description") != updated.get("simple_description"):
+            self.simple_description.setPlainText(updated["simple_description"])
+        if before.get("description_html") != updated.get("description_html"):
+            self.rich_description.set_html(updated["description_html"])
+        for field, media in (("images", self.images), ("detail_images", self.detail_images)):
+            if before.get(field) != updated.get(field):
+                media.set_urls(updated[field])
                 media.textChanged.emit()
-                if target == "detail_images" and workspace.apply_mode == "replace":
-                    self.replace_description_image(address, values)
-                if workspace.result:
-                    for asset in workspace.result.assets:
-                        media.update_size(asset.uri, asset.width, asset.height)
+            # for address, dimensions in updated.get("image_sizes", {}).items():
+            #     if isinstance(dimensions, (list, tuple)) and len(dimensions) == 2:
+            #         media.update_size(address, dimensions[0], dimensions[1])
+            # 2026-10-13：本次修改原因：尺寸显示从已选素材同步，商品缓存仍使用既有字符串格式。
+            for change in changes:
+                for asset in change.get("assets", []):
+                    media.update_size(asset["uri"], asset["width"], asset["height"])
+        for index, sku in enumerate(updated.get("skus", [])):
+            if sku.get("image") != before["skus"][index].get("image"):
+                item = self.sku_table.item(index, 8)
+                if item:
+                    item.setText(sku["image"])
+        self.refresh_sku_images()
         self.mark_dirty()
-        # 2026-10-12：本次修改原因：应用候选只改变表单，明确提示保存和审核下一步。
-        self.edit_feedback.setText("AI 结果已应用到当前字段，尚未保存。请核对后保存修改或保存并审核。")
+        # self.ai_workbench.applied()
+        # 2026-10-13：本次修改原因：仅标记实际应用的目标，未选择结果继续保留。
+        # self.ai_workbench.applied(changes)
+        # 2026-10-14：本次修改原因：记录应用后的商品快照，并与加工草稿分别保存。
+        self.ai_workbench.applied(changes, updated)
+        self.mode_tabs.setCurrentIndex(0)
+        targets = {change["target"]["field"] for change in changes}
+        self.tabs.setCurrentIndex(0 if targets & {"title", "simple_description", "description_html"} else
+                                  (2 if "sku" in targets else 3))
+        self.edit_feedback.setText("AI 结果已应用，尚未保存。请核对后保存修改或保存并审核。")
+
+    # 2026-10-13：本次修改原因：保存不会隐式应用候选；未应用内容仍需用户明确取舍。
+    # def confirm_pending_ai(self):
+    #     # if self.ai_workbench and self.ai_workbench.pending:
+    #     # 2026-10-13：本次修改原因：保存退出前也保护只输入但未生成的 Prompt。
+    #     if self.ai_workbench and (self.ai_workbench.pending or self.ai_workbench.input_dirty):
+    #         return QMessageBox.question(self, "存在未应用的 AI 候选",
+    #             "继续将只保存当前商品表单，未应用候选及 Prompt 的手动编辑不会保存；原始生成结果仍可从历史查看。",
+    #             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+    #             QMessageBox.StandardButton.Cancel) == QMessageBox.StandardButton.Yes
+    #     return True
+    # 2026-10-14：本次修改原因：退出前可独立保存加工方案和候选编辑，未应用结果不会隐式写入商品。
+    def confirm_pending_ai(self):
+        return not self.ai_workbench or self.ai_workbench.confirm_leave()
 
     def replace_description_image(self, address: str, values: list[str]):
         html = self.rich_description.html()
@@ -1116,6 +1475,13 @@ class ProductEditor(QDialog):
             self.rich_description.set_html(updated)
 
     def save_product(self, approve: bool) -> None:
+        # 2026-10-13：本次修改原因：内嵌页面保留 AI 候选锁，不能绕过禁用按钮直接提交。
+        # if self.ai_workspace is not None or self._finished:
+        # 2026-10-13：本次修改原因：持久 AI 页存在不再阻止保存；任务进行中和 AI 模式仍不可直接提交。
+        if self._finished or self.mode_stack.currentIndex() != 0 or (self.ai_workbench and self.ai_workbench.busy):
+            return
+        if not self.confirm_pending_ai():
+            return
         try:
             # self.repository.save_product(self.collect(), approve=approve)
             # 2026-10-11：本次修改原因：没有实际表单内容改动时保留原商品内容，只存预览像素缓存和审核操作。
@@ -1126,26 +1492,80 @@ class ProductEditor(QDialog):
                 product.image_sizes = sizes
             self.repository.save_product(product, approve=approve)
         except Exception as error:
-            QMessageBox.warning(self, "未能保存", str(error))
+            # QMessageBox.warning(self, "未能保存", str(error))
+            # 2026-10-14：本次修改原因：保存失败提供具体栏目和字段。
+            QMessageBox.warning(self, "未能保存", explain_errors(str(error)))
             return
         self.dirty = False
         self.accept()
 
     # 2026-10-13：本次修改原因：保存显示布局；AI 抽屉沿用原等待任务完成保护，取消先关闭候选。
     def done(self, result):
-        if self.ai_workspace is not None:
-            self.edit_feedback.setText("请先在右侧关闭或应用 AI 候选，再保存或退出编辑。")
+        # if self.ai_workspace is not None:
+        #     self.edit_feedback.setText("请先在右侧关闭或应用 AI 候选，再保存或退出编辑。")
+        # 2026-10-13：本次修改原因：统一页面仅在任务进行中阻止离开，不再依赖旧抽屉是否存在。
+        if self.ai_workbench and self.ai_workbench.busy:
+            self.edit_feedback.setText("AI 任务正在进行，请等待完成。")
             return
         save_splitters(self)
         self.editor_preferences.setValue("ui/editor/current_tab", self.tabs.currentIndex())
-        super().done(result)
+        # super().done(result)
+        # 2026-10-13：本次修改原因：页面用关闭信号交回主窗口，保留 Accepted/Rejected 和原保存结果语义。
+        if self._finished:
+            return False
+        self._finished = True
+        if result == QDialog.DialogCode.Accepted:
+            self.accepted.emit()
+        else:
+            self.rejected.emit()
+        self.closed.emit(int(result))
+        return True
 
-    def reject(self) -> None:
-        if self.ai_workspace is not None:
-            self.ai_workspace.reject()
-            return
-        if self.dirty and QMessageBox.question(self, "未保存的修改", "关闭后将丢弃本次未保存的修改。是否关闭？",
-                                              QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
-                                              QMessageBox.StandardButton.Cancel) != QMessageBox.StandardButton.Discard:
-            return
-        super().reject()
+    # 2026-10-13：本次修改原因：兼容原保存入口的 accept 调用，实际返回主窗口的商品列表。
+    def accept(self):
+        return self.done(QDialog.DialogCode.Accepted)
+
+    # def reject(self) -> bool:
+    #     # if self.ai_workspace is not None:
+    #         # self.ai_workspace.reject()
+    #         # return
+    #         # 2026-10-13：本次修改原因：生成中不离开编辑页；空闲候选在确认放弃后随页面关闭。
+    #     #     if self.ai_workspace.busy:
+    #     #         self.ai_workspace.reject()
+    #     #         return False
+    #     # if self.dirty and QMessageBox.question(self, "未保存的修改", "关闭后将丢弃本次未保存的修改。是否关闭？",
+    #     # 2026-10-13：本次修改原因：统一草稿、未应用候选和任务生命周期，返回列表保持原有保护。
+    #     if self.ai_workbench and self.ai_workbench.busy:
+    #         self.ai_workbench.status.setText("AI 任务正在进行，请等待完成后离开。")
+    #         return False
+    #     # pending = bool(self.ai_workbench and self.ai_workbench.pending)
+    #     # 2026-10-13：本次修改原因：返回列表时包含 AI 输入草稿，避免用户文字静默丢失。
+    #     pending = bool(self.ai_workbench and (self.ai_workbench.pending or self.ai_workbench.input_dirty))
+    #     if (self.dirty or pending) and QMessageBox.question(self, "未保存的修改", "关闭将丢弃未保存的商品修改、Prompt 和候选手动编辑。原始生成结果保留在历史中。是否关闭？",
+    #                                           QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
+    #                                           QMessageBox.StandardButton.Cancel) != QMessageBox.StandardButton.Discard:
+    #         return False
+    #     # super().reject()
+    #     # if self.ai_workspace is not None:
+    #     #     self.ai_workspace.reject()
+    #     return self.done(QDialog.DialogCode.Rejected)
+    # 2026-10-14：本次修改原因：返回列表分开保护加工草稿和商品编辑，保存加工草稿不代表保存商品。
+    def reject(self) -> bool:
+        if self.ai_workbench and not self.ai_workbench.confirm_leave():
+            return False
+        if self.dirty and QMessageBox.question(self, "未保存的商品修改",
+                "关闭将放弃尚未保存的商品修改。已保存的加工草稿仍可下次继续，是否关闭？",
+                QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel) != QMessageBox.StandardButton.Discard:
+            return False
+        return self.done(QDialog.DialogCode.Rejected)
+
+    # 2026-10-13：本次修改原因：外部关闭编辑控件与返回按钮遵守相同的未保存和 AI 任务保护。
+    def closeEvent(self, event):
+        if self._finished or self.reject():
+            event.accept()
+        else:
+            event.ignore()
+
+# 2026-10-14：本次修改原因：校验反馈共用可定位的字段补充说明。
+from ..validation_guidance import explain_errors, explain_issue

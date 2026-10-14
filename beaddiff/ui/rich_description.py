@@ -118,7 +118,8 @@ class RichDescription(QWidget):
         toolbar.addWidget(button("链接", self.insert_link))
         toolbar.addWidget(button("HTML", self.edit_html))
         # 2026-10-11：本次修改原因：保持字段旁入口，并允许在图文详情内选择具体图片处理。
-        toolbar.addWidget(button("AI 改详情图", self.request_ai))
+        # toolbar.addWidget(button("AI 改详情图", self.request_ai))
+        # 2026-10-13：本次修改原因：详情图改图汇总到编辑页“AI 处理”，手动插图和 HTML 编辑保留。
         toolbar.addStretch()
         layout.addLayout(toolbar)
         layout.addWidget(self.editor)

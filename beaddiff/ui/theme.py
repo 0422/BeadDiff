@@ -153,6 +153,8 @@ QLabel#navCaption { color: $muted; font-size: 11px; }
 QPushButton#navButton { background: transparent; color: $text; text-align: left; padding: 11px 12px; border: none; border-radius: 8px; }
 QPushButton#navButton:hover { background: $nav_hover; }
 QPushButton#navButton:checked { background: $nav_selected; color: $accent; font-weight: 600; }
+/* 2026-10-14：本次修改原因：底部日志、设置和回收站只显示居中的图标，避免继承文字导航左对齐内边距。 */
+QPushButton#navButton[iconOnly="true"] { text-align: center; padding: 0px; }
 /* 2026-10-13：本次修改原因：顶部只显示标准窗口操作，背景融入工作区，不再重复软件名称与图标。 */
 QFrame#windowBar { background: $window; border: none; }
 QToolButton#windowControl, QToolButton#windowClose { background: transparent; border: none; border-radius: 4px; padding: 0px; margin: 0px; }
@@ -270,15 +272,39 @@ QTabWidget#logTabs::pane { border: none; background: transparent; }
 QTabBar#logTypeTabs::tab { font-size: 14px; padding: 10px 22px; }
 QTabBar#logTypeTabs::tab:hover { background: $hover; }
 QTabBar#logTypeTabs::tab:selected { color: $accent; background: $selected; border-bottom-color: $accent; }
+/* 2026-10-13：本次修改原因：商品编辑模式以紧凑分段控件呈现，沿用当前主题与焦点反馈。 */
+QTabBar#editorModeTabs::tab { background: $surface; color: $muted; padding: 8px 16px; border: 1px solid $border; border-radius: 6px; margin-left: 4px; }
+QTabBar#editorModeTabs::tab:hover { background: $hover; }
+QTabBar#editorModeTabs::tab:selected { background: $selected; color: $accent; border-color: $accent; }
+QTabBar#editorModeTabs::tab:disabled { color: $muted; background: $alternate; }
+/* 2026-10-14：本次修改原因：整商品阶段标签和缩略图卡片复用浅深主题，提高素材清单与审核的可辨识性。 */
+QTabBar#processingSteps::tab { background: $surface; border: 1px solid $border; border-radius: 6px; padding: 7px 16px; margin-right: 8px; }
+QTabBar#processingSteps::tab:selected { color: $accent; background: $selected; border-color: $accent; }
+QFrame#aiImageCard, QFrame#aiTextCard { background: $surface; border: 1px solid $border; border-radius: 9px; }
+QFrame#aiImageCard:hover { border-color: $accent; }
+QTextBrowser { background: $surface; border: 1px solid $border; border-radius: 7px; padding: 8px; }
+
+
 QScrollArea { background: transparent; border: none; }
 /* 2026-10-13：本次修改原因：设置滚动底板透明，与外层圆角卡片保持同一背景，避免突兀的灰色内层矩形。 */
 QWidget#settingsBody { background: transparent; }
 QWidget#editorForm, QWidget#tableViewport { background: $surface; }
+/* 2026-10-13：本次修改原因：按需展开的 AI 工作区使用单层卡片边界，与编辑表单清楚分区。 */
+QWidget#aiWorkspace { background: $surface; border: 1px solid $border; border-radius: 10px; }
 QScrollBar:vertical { background: $alternate; width: 10px; margin: 2px; }
 QScrollBar:horizontal { background: $alternate; height: 10px; margin: 2px; }
-QScrollBar::handle { background: $border; border-radius: 4px; min-height: 24px; min-width: 24px; }
-QScrollBar::add-line, QScrollBar::sub-line { width: 0; height: 0; }
+/* QScrollBar::handle { background: $border; border-radius: 4px; min-height: 24px; min-width: 24px; } */
+/* QScrollBar::add-line, QScrollBar::sub-line { width: 0; height: 0; } */
+/* 2026-10-13：本次修改原因：滚动柄最小尺寸按方向设置，避免 10px 轨道被 24px 横向/纵向尺寸挤压变形。 */
+QScrollBar::handle:vertical { background: $border; border-radius: 3px; min-height: 28px; }
+QScrollBar::handle:horizontal { background: $border; border-radius: 3px; min-width: 28px; }
+QScrollBar::handle:hover, QScrollBar::handle:pressed { background: $muted; }
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; border: none; background: transparent; }
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0px; border: none; background: transparent; }
+QScrollBar::up-arrow, QScrollBar::down-arrow, QScrollBar::left-arrow, QScrollBar::right-arrow { width: 0px; height: 0px; background: transparent; border: none; }
 QScrollBar::add-page, QScrollBar::sub-page { background: transparent; }
+/* 2026-10-13：本次修改原因：表格/文本框的横纵滚动交汇处使用主题底色，消除系统灰色凸起方块。 */
+QAbstractScrollArea::corner { background: $surface; border: none; }
 QStatusBar { background: $surface; color: $muted; border-top: 1px solid $border; }
 QStatusBar::item { border: none; }
 QProgressBar { border: 1px solid $border; background: $alternate; border-radius: 6px; text-align: center; color: $text; }
@@ -493,7 +519,12 @@ def apply_theme(application: QApplication, name: str | None = None) -> None:
     # 2026-10-13：本次修改原因：代理样式只增强数字增减箭头，其他控件继续使用原 Fusion 风格。
     # application.setStyle(ClearSpinStyle(QStyleFactory.create("Fusion")))
     # 2026-10-13：本次修改原因：统一现代下拉框及手动数字输入，替代已撤下的增减箭头绘制。
-    application.setStyle(InterfaceStyle(QStyleFactory.create("Fusion")))
+    # application.setStyle(InterfaceStyle(QStyleFactory.create("Fusion")))
+    # 2026-10-14：本次修改原因：浅深主题仅更新配色和样式表，复用应用代理样式，避免已有组合框在反复替换样式时失效。
+    if not getattr(application, "_beaddiff_interface_style", None):
+        style = InterfaceStyle(QStyleFactory.create("Fusion"))
+        application.setStyle(style)
+        application._beaddiff_interface_style = style
     application.setFont(QFont("Microsoft YaHei UI", 10))
     palette = QPalette()
     roles = {"Window": "window", "WindowText": "text", "Base": "surface",

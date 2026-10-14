@@ -22,6 +22,11 @@ from .miaoshou_mapping import create_payload, edited_fields, picture_urls, updat
 from .models import Product, valid_url
 # 2026-10-12：本次修改原因：接入独立图片缓存，成功的每张图立即落库，不依赖整条商品回传成功。
 from .miaoshou_picture_cache import MiaoshouPictureCache
+# 2026-10-14：本次修改原因：最终同步 ERP 时才把本机 AI/编辑图片托管为公网链接，编辑草稿继续保留本机素材。
+from .assets import AssetStore
+from .image_hosting import GitHubImageHosting, ImageHostingStore
+# 2026-10-14：本次修改原因：更新模式仅检查实际写入的详情图片及 SKU 图片是否需要图床。
+from .content import description_images
 
 
 PUBLIC_PATH = "/open/v1/product/common_collect_box/common_collect_box/"
@@ -226,11 +231,18 @@ def _replace_pictures(value, replacements: dict[str, str], key: str = ""):
         if key == "notes":
             # 只替换 HTML 图片属性中的链接，正文里相同文本保留。
             import re
-            return re.sub(r'(<img\b[^>]*\bsrc\s*=\s*["\x27])([^"\x27]+)(["\x27])',
+            # return re.sub(r'(<img\b[^>]*\bsrc\s*=\s*["\x27])([^"\x27]+)(["\x27])',
                           # lambda match: match[1] + replacements.get(match[2], match[2]) + match[3], value, flags=re.I)
                           # 2026-10-11：本次修改原因：保留未替换属性原文，正确处理 URL 中的 &amp;。
-                          lambda match: match[1] + (escape(replacements[unescape(match[2])], quote=True)
-                                                    if unescape(match[2]) in replacements else match[2]) + match[3], value, flags=re.I)
+            # 2026-10-14：本次修改原因：同步阶段兼容带引号和无引号的详情 img src，确保本机图均替换公网链接。
+            def replace_img(match):
+                source = next((part for part in match.groups()[1:] if part is not None), "")
+                public = replacements.get(unescape(source))
+                if public is None:
+                    return match.group(0)
+                quote_char = '"' if match.group(2) is not None else ("'" if match.group(3) is not None else "")
+                return match.group(1) + quote_char + escape(public, quote=bool(quote_char)) + quote_char
+            return re.sub(r'''(<img\b[^>]*\bsrc\s*=\s*)(?:"([^"]*)"|'([^']*)'|([^\s>]+))''', replace_img, value, flags=re.I)
     return value
 
 
@@ -249,11 +261,14 @@ def _matches_submitted(actual, expected, key: str = "") -> bool:
 
 
 class MiaoshouAdapter:
-    def __init__(self, store: MiaoshouConfigStore, transport: httpx.BaseTransport | None = None):
+    def __init__(self, store: MiaoshouConfigStore, transport: httpx.BaseTransport | None = None,
+                 hosting: GitHubImageHosting | None = None):
         self.store = store
         self.transport = transport
         # 2026-10-12：本次修改原因：缓存跟随当前数据目录，初始化不创建文件或更改商品记录。
         self.picture_cache = MiaoshouPictureCache(store.path.parent)
+        # 2026-10-14：本次修改原因：无界面调用也使用同一图床配置，避免只有主窗口实例能处理本机图片。
+        self.hosting = hosting or GitHubImageHosting(ImageHostingStore(store.path.parent), AssetStore(store.path.parent))
 
     @property
     def unavailable_reason(self) -> str:
@@ -270,6 +285,8 @@ class MiaoshouAdapter:
     def _prepare_pictures(self, client: MiaoshouClient, payload: dict, remote: dict, notify=None) -> tuple[dict, dict]:
         urls = picture_urls(payload)
         old_pictures = set(picture_urls(remote))
+        # progress = {"total": len(urls), "hosted": 0, "uploaded": 0, "cache_saved": 0, "cache_reused": 0, "remote_reused": 0}
+        # 2026-10-14：本次修改原因：纯公网图维持既有进度字段，仅实际托管时追加托管数量。
         progress = {"total": len(urls), "uploaded": 0, "cache_saved": 0, "cache_reused": 0, "remote_reused": 0}
         replacements = {}
         try:
@@ -281,16 +298,32 @@ class MiaoshouAdapter:
                     progress["remote_reused"] += 1
                     continue
                 try:
+                    # 2026-10-14：本次修改原因：本机素材只在 ERP 同步阶段转成公网地址，候选图和编辑草稿不提前上传。
+                    try:
+                        public_url = self.hosting.ensure_public(url)
+                    # except (OSError, ValueError) as error:
+                    # 2026-10-14：本次修改原因：图床 SQLite 故障单独报告，不误归因妙手图片缓存，也不泄露原异常。
+                    except sqlite3.Error:
+                        raise ERPNotSentError("图床缓存读取或保存失败；商品尚未提交。请到设置 → 系统查看数据目录，检查磁盘空间与写权限，然后在图床页重试。", {"cache_kind": "image_hosting"}) from None
+                    except (OSError, ValueError) as error:
+                        # 2026-10-14：本次修改原因：图床故障单独报告，避免误称图片上传缓存失败。
+                        raise ERPNotSentError(f"图床托管图片失败：{error} 商品尚未提交。") from None
+                    if public_url != url:
+                        progress["hosted"] = progress.get("hosted", 0) + 1
+                        replacements[url] = public_url
+                    if public_url in old_pictures:
+                        progress["remote_reused"] += 1
+                        continue
                     # 2026-10-12：本次修改原因：同一应用并发任务的查缓存/上传/写缓存串行处理，避免相同图片同时重复转存。
                     with self.picture_cache.lock:
-                        cached = self.picture_cache.get(client.config.account_id, url)
+                        cached = self.picture_cache.get(client.config.account_id, public_url)
                         if cached:
                             replacements[url] = cached
                             progress["cache_reused"] += 1
                             continue
-                        address = client.upload_picture(url)
+                        address = client.upload_picture(public_url)
                         progress["uploaded"] += 1
-                        self.picture_cache.put(client.config.account_id, url, address)
+                        self.picture_cache.put(client.config.account_id, public_url, address)
                         progress["cache_saved"] += 1
                         replacements[url] = address
                 except (OSError, sqlite3.Error, ValueError) as error:
@@ -301,7 +334,8 @@ class MiaoshouAdapter:
                     }) from None
         except ERPNotSentError as error:
             details = {**error.details, "picture_progress": {**progress, "failed_index": index}}
-            summary = (f"图片进度：本次上传 {progress['uploaded']} 张，已保存缓存 {progress['cache_saved']} 张，"
+            # summary = (f"图片进度：本次托管 {progress['hosted']} 张，上传妙手 {progress['uploaded']} 张，已保存缓存 {progress['cache_saved']} 张，"
+            summary = (f"图片进度：本次托管 {progress.get('hosted', 0)} 张，上传妙手 {progress['uploaded']} 张，已保存缓存 {progress['cache_saved']} 张，"
                        f"复用缓存 {progress['cache_reused']} 张，复用远端 {progress['remote_reused']} 张（共 {progress['total']} 张）。")
             raise ERPNotSentError(str(error) + "\n" + summary + "已保存的缓存会在再次回传时复用。", details) from None
         return _replace_pictures(deepcopy(payload), replacements), progress
@@ -327,10 +361,43 @@ class MiaoshouAdapter:
                 return ["原商品尚未关联当前 AppKey 对应账号，请点击“关联妙手原商品”重新查询确认。"]
             return []
         try:
-            create_payload(product, config)
+            # create_payload(product, config)
+            # 2026-10-14：本次修改原因：仅在待发送请求构造阶段接受本机图，最终 payload 仍要求公网地址。
+            create_payload(product, config, allow_local_images=True)
         except ValueError as error:
             return [str(error)]
         return []
+
+    # 2026-10-14：本次修改原因：把本机图片的图床预检查放入 ERP 统一校验，失败时阻止提交并给出设置入口。
+    # def validate_media(self, product: Product) -> list[str]:
+    # 2026-10-14：本次修改原因：更新只检查真正写入 ERP 的图片，旧的未修改本机素材不阻挡文案更新。
+    def validate_media(self, product: Product, mode: str = "create") -> list[str]:
+        if mode != "update":
+            # return self.hosting.validate_product(product)
+            # 2026-10-14：本次修改原因：新增按实际请求中的图片预检，不让旧详情列表或非图片附件触发图床要求。
+            try:
+                payload = create_payload(product, self.store.get(), allow_local_images=True)
+            except ValueError as error:
+                return [str(error)]
+            return self.hosting.validate_addresses(picture_urls(payload))
+        fields = edited_fields(product)
+        addresses = []
+        if "images" in fields:
+            addresses.extend(product.images)
+        # if fields & {"description", "description_html", "detail_images"}:
+        #     addresses.extend(product.detail_images)
+        #     addresses.extend(description_images(product.description_html))
+        # 2026-10-14：本次修改原因：显式修改 HTML 时只提交其现有图片；纯文案更新沿用远端图片，不检查旧本机列表。
+        if "description_html" in fields:
+            addresses.extend(description_images(product.description_html))
+        elif "detail_images" in fields:
+            addresses.extend(product.detail_images)
+        if "size_chart" in fields:
+            addresses.append(product.size_chart)
+        for sku in product.skus:
+            if f"sku:{sku.identity}:image" in fields:
+                addresses.append(sku.image)
+        return self.hosting.validate_addresses(addresses)
 
     def send(self, request: ERPRequest) -> ERPReceipt:
         errors = self.validate(request.product, request.mode)
@@ -349,9 +416,13 @@ class MiaoshouAdapter:
                     request.progress("读取妙手原商品")
                 detail = client.detail(request.original_id)
                 remote = detail["editCommonCollectBoxDetail"]
-                payload, links = update_payload(product, remote, client.config)
+                # payload, links = update_payload(product, remote, client.config)
+                # 2026-10-14：本次修改原因：先生成待托管图片的更新副本，再上传并替换公网链接。
+                payload, links = update_payload(product, remote, client.config, allow_local_images=True)
             elif request.mode == "create":
-                payload = create_payload(product, client.config)
+                # payload = create_payload(product, client.config)
+                # 2026-10-14：本次修改原因：新增商品也延迟上传采用的本机图片至同步阶段。
+                payload = create_payload(product, client.config, allow_local_images=True)
                 # 2026-10-12：本次修改原因：同账号 API 商品副本直接复用原详情中已存入妙手的图片，新增图片仍经过上传。
                 if product.erp_imported:
                     remote = product.erp_remote_snapshot

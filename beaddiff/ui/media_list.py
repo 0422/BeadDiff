@@ -30,7 +30,9 @@ class MediaList(QWidget):
     # def __init__(self, urls: list[str], sizes: dict[str, str], assets: AssetStore | None = None, enable_ai: bool = False):
     # 2026-10-12：本次修改原因：可选上限仅用于主图等有明确数量规则的列表，详情图和爆款参考图不强加主图限制。
     def __init__(self, urls: list[str], sizes: dict[str, str], assets: AssetStore | None = None, enable_ai: bool = False,
-                 maximum: int | None = None):
+                 # maximum: int | None = None):
+                 # 2026-10-13：本次修改原因：窄栏图片工具可使用两列按钮，保持商品全宽列表原有布局。
+                 maximum: int | None = None, action_columns: int = 3):
         super().__init__()
         # self.sizes = sizes
         # 2026-10-11：本次修改原因：预览取得的尺寸仅更新编辑副本，取消编辑不改原商品。
@@ -75,7 +77,9 @@ class MediaList(QWidget):
         # actions.addStretch()
         action_buttons += [button("移除选中", self.remove_selected), button("上移", lambda: self.move(-1)), button("下移", lambda: self.move(1))]
         for index, action in enumerate(action_buttons):
-            actions.addWidget(action, index // 3, index % 3)
+            # actions.addWidget(action, index // 3, index % 3)
+            # 2026-10-13：本次修改原因：按使用位置安排工具按钮，避免 Prompt 页横向裁切。
+            actions.addWidget(action, index // action_columns, index % action_columns)
         layout.addLayout(actions)
         # 2026-10-12：本次修改原因：打开编辑器即检查已有超限图片，新增、移除、AI 应用后跟随刷新。
         self.count_hint = label("", "hint", True)

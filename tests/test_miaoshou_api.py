@@ -549,6 +549,97 @@ def test_picture_cache_survives_partial_failure_and_adapter_restart(tmp_path):
     assert receipt.details["picture_progress"]["uploaded"] == 1
 
 
+# 2026-10-14：本次修改原因：验证仅已应用到商品的本机主图、详情图和 SKU 图在同步时托管，候选图不上传且草稿不改写。
+@pytest.mark.parametrize("mode", ["create", "update"])
+def test_sync_hosts_only_submitted_local_images_and_keeps_draft(tmp_path, mode):
+    from io import BytesIO
+    from PIL import Image
+    from beaddiff.assets import AssetStore
+
+    assets = AssetStore(tmp_path)
+    def picture(color):
+        buffer = BytesIO()
+        Image.new("RGB", (16, 16), color).save(buffer, format="PNG")
+        return assets.save(buffer.getvalue()).uri
+
+    # main, detail, sku, unused_candidate = (picture(color) for color in ("red", "green", "blue", "yellow"))
+    # 2026-10-14：本次修改原因：新增和更新都验证尺码图托管及 payload 替换，未采用候选不上传。
+    main, detail, sku, unused_candidate, size_chart = (picture(color) for color in ("red", "green", "blue", "yellow", "purple"))
+    item = product()
+    item.images = [main]
+    item.detail_images = [detail]
+    item.description_html = f"<p>详情</p><img src={detail}>"
+    item.skus[0].image = sku
+    # item.manual_fields = ["images", "description_html", "sku:SKU-A:image"]
+    # 2026-10-14：本次修改原因：更新尺码图需显式记录对应修改字段。
+    item.size_chart = size_chart
+    item.manual_fields = ["images", "description_html", "sku:SKU-A:image", "size_chart"]
+    item.erp_original_id = "123"
+    item.erp_original_account = config().account_id
+    item.erp_sku_links = {"SKU-A": ";COLOR-ID;SIZE-ID;"}
+    before = item.to_dict()
+
+    class RecordingHosting:
+        def __init__(self):
+            self.used = []
+
+        def ensure_public(self, address):
+            self.used.append(address)
+            return "https://cdn.jsdelivr.net/gh/owner/images@main/" + address.rsplit("/", 1)[-1]
+
+    hosting = RecordingHosting()
+    sent = []
+    def handler(request):
+        if request.url.path == DETAIL_PATH:
+            return success({"editCommonCollectBoxDetail": remote(), "ossMd5": "fresh-md5"})
+        if request.url.path == PICTURE_PATH:
+            sent.append(json.loads(request.content)["imgUrl"])
+            return success({"picturePath": f"https://erp.example.com/image-{len(sent)}.png"})
+        assert request.url.path in {CREATE_PATH, UPDATE_PATH}
+        body = json.loads(request.content)
+        payload = body if mode == "create" else body["editCommonCollectBoxDetail"]
+        assert payload["itemNum"] == (item.main_code if mode == "create" else remote()["itemNum"])
+        assert all(not url.startswith("file:") for url in payload["imgUrls"])
+        assert "file:" not in payload["notes"]
+        assert "file:" not in json.dumps(payload["colorMap"])
+        # 2026-10-14：本次修改原因：尺码图与主图、详情图及 SKU 图均必须替换为转存成功的新链接。
+        assert payload["sizeChart"] == f"https://erp.example.com/image-{len(sent)}.png"
+        return success({"commonCollectBoxDetailId": 456} if mode == "create" else {"ossMd5": "saved-md5"})
+
+    service = adapter(tmp_path, handler)
+    service.hosting = hosting
+    service.send(ERPRequest("T1", mode, item, "123" if mode == "update" else ""))
+    # assert set(hosting.used) == {main, detail, sku}
+    # 2026-10-14：本次修改原因：尺码图同样进入实际提交图片集合。
+    assert set(hosting.used) == {main, detail, sku, size_chart}
+    assert unused_candidate not in hosting.used
+    # assert len(sent) == 3
+    # 2026-10-14：本次修改原因：新增尺码图只增加一次托管与转存。
+    assert len(sent) == 4
+    assert item.to_dict() == before
+
+
+# 2026-10-14：本次修改原因：图床失败必须在商品提交前中止，原商品主编号和本机图片维持原样。
+def test_hosting_failure_prevents_erp_submission(tmp_path):
+    from io import BytesIO
+    from PIL import Image
+    from beaddiff.assets import AssetStore
+
+    buffer = BytesIO()
+    Image.new("RGB", (16, 16), "white").save(buffer, format="PNG")
+    item = product()
+    item.images = [AssetStore(tmp_path).save(buffer.getvalue()).uri]
+    before = item.to_dict()
+    service = adapter(tmp_path, lambda _request: pytest.fail("图床失败后不应请求妙手"))
+    class FailingHosting:
+        def ensure_public(self, _address):
+            raise ValueError("公网链接不可访问")
+    service.hosting = FailingHosting()
+    with pytest.raises(ERPNotSentError, match="图床托管图片失败"):
+        service.send(ERPRequest("T1", "create", item, ""))
+    assert item.to_dict() == before
+
+
 # 2026-10-12：本次修改原因：相同图片只在同一 AppKey 下复用，跨商品复用但不能串用其他账号的图片空间地址。
 def test_picture_cache_reuses_across_products_and_isolates_app_keys(tmp_path):
     calls = []
@@ -647,3 +738,36 @@ def test_picture_cache_write_failure_stops_product_submission(tmp_path, monkeypa
     assert caught.value.details["picture_progress"]["uploaded"] == 1
     assert caught.value.details["picture_progress"]["cache_saved"] == 0
     assert not service.picture_cache.path.exists()
+
+
+# 2026-10-14：本次修改原因：图床缓存读写故障在商品提交前终止，报告真实故障位置且不暴露底层异常。
+@pytest.mark.parametrize('phase', ['read', 'write'])
+def test_image_host_cache_error_stops_before_erp_and_keeps_product(tmp_path, monkeypatch, phase):
+    import sqlite3
+    from io import BytesIO
+    from PIL import Image
+    from beaddiff.assets import AssetStore
+    from beaddiff.image_hosting import ImageHostingConfig, ImageHostingStore, GitHubImageHosting
+    assets = AssetStore(tmp_path)
+    raw = BytesIO()
+    Image.new('RGB', (32, 32), 'white').save(raw, format='PNG')
+    image = assets.save(raw.getvalue())
+    item = product()
+    item.images = [image.uri]
+    before = item.to_dict()
+    store = ImageHostingStore(tmp_path)
+    store.save(ImageHostingConfig(enabled=True, owner='owner', repository='images', token='fake-token'))
+    if phase == 'read':
+        store.cache_path.write_bytes(b'not a sqlite database')
+    else:
+        def broken_write(*_args, **_kwargs):
+            raise sqlite3.OperationalError('secret-token in raw exception')
+        monkeypatch.setattr(store, 'cache_put', broken_write)
+    service = adapter(tmp_path, lambda _request: pytest.fail('Cache failure must prevent any ERP request'))
+    service.hosting = GitHubImageHosting(store, assets)
+    with pytest.raises(ERPNotSentError) as caught:
+        service.send(ERPRequest('T-cache', 'create', item, ''))
+    message = str(caught.value)
+    assert '图床' in message and '缓存' in message and '商品尚未提交' in message
+    assert 'secret-token' not in message and '妙手缓存' not in message
+    assert item.to_dict() == before

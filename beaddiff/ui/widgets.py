@@ -15,6 +15,64 @@ from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequ
 from PySide6.QtWidgets import QFrame, QGridLayout, QHBoxLayout, QLabel, QPushButton, QVBoxLayout
 
 
+# 2026-10-14：本次修改原因：Prompt 按文字换行、窗口宽度及字体调整高度，长文限制最大高度后保留滚动。
+from math import ceil
+from PySide6.QtCore import QEvent, QTimer
+from PySide6.QtGui import QTextDocument
+from PySide6.QtWidgets import QPlainTextEdit, QSizePolicy
+
+
+class AutoHeightTextEdit(QPlainTextEdit):
+    def __init__(self, text="", parent=None, *, minimum_lines=2, maximum_lines=8):
+        super().__init__(text, parent)
+        self.minimum_lines = minimum_lines
+        self.maximum_lines = max(minimum_lines, maximum_lines)
+        self.height_timer = QTimer(self)
+        self.height_timer.setSingleShot(True)
+        self.height_timer.timeout.connect(self.fit_content_height)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
+        self.textChanged.connect(lambda: self.height_timer.start(0))
+        # 2026-10-14：本次修改原因：加入布局前先确定输入高度，避免首次进入 AI 页使用默认 192 像素高度撑大主窗口。
+        self.fit_content_height()
+        self.height_timer.start(0)
+
+    def fit_content_height(self):
+        self.ensurePolished()
+        measured = QTextDocument()
+        measured.setDefaultFont(self.font())
+        measured.setDefaultTextOption(self.document().defaultTextOption())
+        measured.setDocumentMargin(self.document().documentMargin())
+        measured.setPlainText(self.toPlainText())
+        measured.setTextWidth(max(1, self.viewport().width()))
+        line_height = self.fontMetrics().lineSpacing()
+        margin = 2 * measured.documentMargin()
+        content = max(self.minimum_lines * line_height + margin,
+                      min(self.maximum_lines * line_height + margin,
+                          measured.size().height()))
+        # 2026-10-14：本次修改原因：保留主题输入框的边框与内边距，高 DPI 下也不会裁切首尾行。
+        padding = max(2 * self.frameWidth(), self.height() - self.viewport().height())
+        height = ceil(content + padding)
+        if self.height() != height:
+            self.setFixedHeight(height)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, "height_timer") and event.size().width() != event.oldSize().width():
+            self.height_timer.start(0)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.height_timer.start(0)
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if hasattr(self, "height_timer") and event.type() in (
+                QEvent.Type.FontChange, QEvent.Type.ApplicationFontChange, QEvent.Type.StyleChange):
+            self.height_timer.start(0)
+
+
 # 2026-10-13：本次修改原因：原固定24像素图标注释保留，SVG矢量引擎适配125%/150%缩放。
 # def icon(name: str, color: str = "#70888d") -> QIcon:
 #     pixmap = QPixmap(24, 24)
@@ -94,8 +152,18 @@ def icon(name: str, color: str = "#70888d") -> QIcon:
         "capture": '<rect x="4" y="6" width="16" height="14" rx="2"/><path d="M8 3v6m8-6v6M8 13h8m-8 4h5"/>',
         "import": '<path d="M4 15v5h16v-5M12 3v12m-4-4 4 4 4-4"/>',
         "export": '<path d="M4 15v5h16v-5M12 15V3m-4 4 4-4 4 4"/>',
-        "settings": '<path d="M6 3v3m0 4v11M12 3v10m0 4v4M18 3v5m0 4v9"/><circle cx="6" cy="8" r="2"/><circle cx="12" cy="15" r="2"/><circle cx="18" cy="10" r="2"/>',
+        # "settings": '<path d="M6 3v3m0 4v11M12 3v10m0 4v4M18 3v5m0 4v9"/><circle cx="6" cy="8" r="2"/><circle cx="12" cy="15" r="2"/><circle cx="18" cy="10" r="2"/>',
+        # 2026-10-14：本次修改原因：底栏使用可识别的齿轮、笔记本和垃圾桶图标。
+        "settings": '<path d="M10 2h4l.5 2.2 1.8.8 1.9-1.1 2.8 2.8-1.1 1.9.8 1.8 2.2.5v4l-2.2.5-.8 1.8 1.1 1.9-2.8 2.8-1.9-1.1-1.8.8L14 22h-4l-.5-2.2-1.8-.8-1.9 1.1L3 17.3l1.1-1.9-.8-1.8L1 13v-2l2.3-.5.8-1.8L3 6.8 5.8 4l1.9 1.1 1.8-.8L10 2Z"/><circle cx="12" cy="12" r="3"/>',
         "search": '<circle cx="10" cy="9" r="6"/><path d="m14 14 7 7"/>',
+        # 2026-10-13：本次修改原因：商品编辑页提供返回列表的矢量图标，复用现有 SVG 引擎。
+        "back": '<path d="m10 5-7 7 7 7M3 12h18"/>',
+        # 2026-10-13：本次修改原因：新导航使用可随主题变色的 SVG 图标，不增加打包资源依赖。
+        "analysis": '<path d="M4 20h16M6 16v-5m6 5V6m6 10V3M4 8l6-5"/>',
+        "tracking": '<path d="m3 7 9-4 9 4-9 4-9-4v10l9 4 9-4V7M12 11v10M7 5l9 4"/>',
+        "logs": '<path d="M6 3h12a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2ZM8 3v18m4-13h5m-5 4h5m-5 4h4"/>',
+        "trash": '<path d="M4 7h16M9 7V4h6v3m3 0-1 14H7L6 7m4 4v6m4-6v6"/>',
+        "hosting": '<path d="M7 17a4 4 0 0 1-.3-8A6 6 0 0 1 18 8a4.5 4.5 0 0 1-.5 9H7Zm5 2v-9m-3 3 3-3 3 3"/>',
     }
     shape = paths.get(name, '<path d="m5 12 5 5L20 6"/>')
     return QIcon(SvgIconEngine(

@@ -10,7 +10,9 @@ from uuid import uuid4
 from ..assets import AssetStore, ImageAsset
 from ..content import clean_description
 from ..models import now_iso
-from .client import CompatibleClient, image_bytes, image_sources
+# from .client import CompatibleClient, image_bytes, image_sources
+# 2026-10-14：本次修改原因：单独识别模型调用错误，保留服务商 request id 供排查。
+from .client import CompatibleClient, ModelCallError, image_bytes, image_sources
 from .config import ModelConfigStore
 from .contracts import AIRequest, AIResult
 from .jobs import JobStore
@@ -43,7 +45,9 @@ class AIService:
         result = AIResult(job_id, request.operation, model_caption=profile.caption)
         job = {"id": job_id, "created_at": now_iso(), "state": "running", "operation": request.operation,
                "product_id": request.product.get("id", ""), "request": asdict(request),
-               "model": profile.public_dict()}
+               # "model": profile.public_dict()}
+               # 2026-10-14：本次修改原因：任务历史保存错误 request id，不记录模型凭证。
+               "model": profile.public_dict(), "request_ids": []}
         self.jobs.save(job)
         context = json.dumps(facts(request.product), ensure_ascii=False)
         prompt = (f"商品事实：{context}\n目标语言：{request.language}\n"
@@ -54,13 +58,21 @@ class AIService:
                     progress("正在生成文本…")
                 tasks = {"title": "生成产品标题", "simple_description": "生成简易描述，使用纯文本卖点",
                          "description_html": "生成详细描述，只使用静态 HTML 段落、标题和列表",
-                         "reference_analysis": "分析参考素材的表达、构图、光影、版式和图片用途次序，输出可复用的风格 Prompt"}
+                         # "reference_analysis": "分析参考素材的表达、构图、光影、版式和图片用途次序，输出可复用的风格 Prompt"}
+                         # 2026-10-14：本次修改原因：规划使用文本模型独立输出结构化方案，与实际生图分开调用。
+                         "reference_analysis": "分析参考素材的表达、构图、光影、版式和图片用途次序，输出可复用的风格 Prompt",
+                         "product_plan": "按用户给定结构返回整商品加工方案 JSON，不生成图片"}
                 if request.operation not in tasks:
                     raise ValueError("当前 AI 功能尚未开放。")
                 old = request.product.get(request.operation, "")
                 prompt += f"\n任务：{tasks[request.operation]}\n当前内容：{old}\n"
                 count = max(1, min(request.count, 4))
-                prompt += f'输出 {count} 个候选，仅返回 JSON：{{"candidates":["候选内容"]}}。'
+                # prompt += f'输出 {count} 个候选，仅返回 JSON：{{"candidates":["候选内容"]}}。'
+                # 2026-10-14：本次修改原因：规划直接返回方案对象，其他文案仍沿用候选格式。
+                if request.operation == "product_plan":
+                    prompt += "仅输出用户指定结构的 JSON 对象，不包裹 candidates。"
+                else:
+                    prompt += f'输出 {count} 个候选，仅返回 JSON：{{"candidates":["候选内容"]}}。'
                 # images = request.reference_images
                 # if request.operation == "reference_analysis":
                 #     images = list(dict.fromkeys(request.subject_images + images))
@@ -104,6 +116,12 @@ class AIService:
                         asset = self.assets.save(image_bytes(sources[0], self.assets))
                         result.assets.append(asset)
                         result.purposes.append(purpose)
+                    # except (ValueError, OSError) as error:
+                    # 2026-10-14：本次修改原因：模型错误需要先记录 request id，再按普通生成错误保留到结果中。
+                    except ModelCallError as error:
+                        if error.request_id and error.request_id not in job["request_ids"]:
+                            job["request_ids"].append(error.request_id)
+                        result.errors.append(f"第 {index + 1} 张：{error}")
                     except (ValueError, OSError) as error:
                         result.errors.append(f"第 {index + 1} 张：{error}")
                     job["result"] = asdict(result)
@@ -116,6 +134,9 @@ class AIService:
             return result
         except Exception as error:
             job["state"] = "failed"
+            # 2026-10-14：本次修改原因：文本与规划请求失败时同样保留服务商 request id。
+            if isinstance(error, ModelCallError) and error.request_id and error.request_id not in job["request_ids"]:
+                job["request_ids"].append(error.request_id)
             # 不保存异常对象或 HTTP 请求头，防止将凭证写进日志。
             job["error"] = str(error).replace(profile.key, "[密钥已隐藏]") if profile.key else str(error)
             self.jobs.save(job)

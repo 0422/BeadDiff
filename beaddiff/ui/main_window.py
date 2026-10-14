@@ -17,6 +17,8 @@ from datetime import datetime
 from PySide6.QtCore import Qt, QThreadPool, QTimer, QUrl, Slot, Signal, QSettings
 # 2026-10-13：本次修改原因：导航图标响应主题事件，使用 Qt 事件枚举统一处理。
 from PySide6.QtCore import QEvent
+# 2026-10-13：本次修改原因：页面式编辑返回后按商品 ID 恢复列表多行选择，不依赖易变的行号。
+from PySide6.QtCore import QItemSelectionModel
 # from PySide6.QtGui import QColor, QDesktopServices
 # 2026-10-13：本次修改原因：快捷键复用现有搜索、编辑和移除按钮，不新增业务操作。
 from PySide6.QtGui import QColor, QDesktopServices, QShortcut, QKeySequence
@@ -65,9 +67,15 @@ from .window_chrome import DesktopWindow, WindowBar
 from ..ai.config import ModelConfigStore
 from ..ai.service import AIService
 from ..assets import AssetStore
+from ..image_hosting import GitHubImageHosting, ImageHostingStore
 from .ai_runner import TaskHub
 from .model_settings import ModelSettingsPage
+# from .product_creation import ProductCreation
+# 2026-10-14：本次修改原因：接入白底图配置与错误处理位置。
 from .product_creation import ProductCreation
+from ..listing import ListingDefaultsStore
+from .listing_settings import ListingSettingsPage
+from ..validation_guidance import explain_errors, explain_issue
 # 2026-10-11：本次修改原因：商品编辑和两条建档路线共用官方公共采集箱适配器与独立凭证配置。
 from ..miaoshou import MiaoshouAdapter
 from ..miaoshou_config import MiaoshouConfigStore
@@ -83,6 +91,7 @@ from .miaoshou_import import MiaoshouImportDialog
 from .workflow_pages import AcquisitionRecordsPage, ERPRecordsPage, HelpPage, LogRecordsPage
 # 2026-10-13：本次修改原因：回收站独立成页，所有删除来源都可进入查看和选择恢复。
 from .recycle_bin import RecycleBinPage
+from .image_hosting import ImageHostingConfigPage, ImageHostingPage
 from ..workflow import ROUTE_LABELS, TARGET_LABEL, local_picture_count, transfer_status
 
 
@@ -116,7 +125,15 @@ class MainWindow(DesktopWindow):
     PAGE_LOGS = 1
     PAGE_SETTINGS = 2
     PAGE_RECYCLE = 3
-    SETTINGS_HELP = 4
+    # 2026-10-13：本次修改原因：追加页面编号保持旧跳转稳定，导航顺序独立于堆栈编号。
+    PAGE_REFERENCES = 4
+    PAGE_TRACKING = 5
+    PAGE_HOSTING = 6
+    SETTINGS_HOSTING = 4
+    # SETTINGS_HELP = 5
+    # 2026-10-14：本次修改原因：追加白底图设置编号，不改变既有帮助、图床和系统跳转。
+    SETTINGS_HELP = 5
+    SETTINGS_LISTING = 7
     # 2026-10-12：本次修改原因：后台阶段提示只在主线程更新界面。
     transfer_progress = Signal(str)
     def __init__(self, settings: Settings, repository: Repository, service: CaptureService, receiver: LocalReceiver):
@@ -127,13 +144,22 @@ class MainWindow(DesktopWindow):
         self.pool.setMaxThreadCount(2)
         # 2026-10-11：本次修改原因：启动时加载独立模型配置文件，所有编辑入口复用同一服务。
         self.model_config = ModelConfigStore(settings.data_dir)
+        # self.assets = AssetStore(settings.data_dir)
+        # 2026-10-14：本次修改原因：所有白底图建档读取同一设置。
         self.assets = AssetStore(settings.data_dir)
+        self.listing_defaults_store = ListingDefaultsStore(settings.data_dir)
         self.ai_service = AIService(self.model_config, self.assets)
+        # 2026-10-14：本次修改原因：图床凭证只在设置页配置，商品页和同步页直接复用，不重复弹模型或图床设置。
+        self.image_hosting_store = ImageHostingStore(settings.data_dir)
+        self.image_hosting_service = GitHubImageHosting(self.image_hosting_store, self.assets)
+        # 2026-10-13：本次修改原因：独立爆款方案库与商品 AI 页共享本地存储。
+        from ..ai.references import ReferenceStore
+        self.reference_store = ReferenceStore(settings.data_dir)
         # 2026-10-11：本次修改原因：两条商品路线保存后共用妙手回传适配层。
         # self.erp_service = ERPService(repository)
         # 2026-10-11：本次修改原因：加载本地开放平台凭证并注入真实公共采集箱适配器。
         self.miaoshou_config = MiaoshouConfigStore(settings.data_dir)
-        self.miaoshou_adapter = MiaoshouAdapter(self.miaoshou_config)
+        self.miaoshou_adapter = MiaoshouAdapter(self.miaoshou_config, hosting=self.image_hosting_service)
         self.erp_service = ERPService(repository, self.miaoshou_adapter)
         self.ai_hub = TaskHub(self)
         self._tasks: set[Task] = set()
@@ -146,6 +172,8 @@ class MainWindow(DesktopWindow):
         # 2026-10-13：本次修改原因：列表按采集商品/白底图商品切换展示，仅是界面筛选，不改变获取路线或存储。
         self.product_source = "capture"
         self.current_product: Product | None = None
+        # 2026-10-13：本次修改原因：商品编辑共用主窗口页面栈，保留列表实例及进入前的显示状态。
+        self.product_editor: ProductEditor | None = None
         # self.setWindowTitle("BeadDiff · 商品工作台")
         # 2026-10-12：本次修改原因：统一商品加工入口、来源和反馈链路。
         self.setWindowTitle("BeadDiff · 商品加工")
@@ -203,6 +231,14 @@ class MainWindow(DesktopWindow):
         # self.stack.addWidget(HelpPage(self))
         self.recycle_bin_page = RecycleBinPage(self)
         self.stack.addWidget(self.recycle_bin_page)
+        # 2026-10-13：本次修改原因：增加爆款方案管理和包裹追踪占位入口，现有业务页面不变。
+        from .reference_analysis import ReferenceAnalysisPage, PackageTrackingPage
+        self.reference_analysis_page = ReferenceAnalysisPage(self.ai_service, self.ai_hub, self.reference_store, self)
+        self.stack.addWidget(self.reference_analysis_page)
+        self.stack.addWidget(PackageTrackingPage(self))
+        # 2026-10-14：本次修改原因：独立展示已托管图片及公网链接，候选图仍留在商品编辑草稿中。
+        self.image_hosting_page = ImageHostingPage(self.image_hosting_store, self.image_hosting_service, self.ai_hub, self)
+        self.stack.addWidget(self.image_hosting_page)
         self.workspace_layout.addWidget(self.stack, 1)
         # self.statusBar().showMessage("就绪 · 原始材料与编辑版本保存在本机")
         # 2026-10-13：本次修改原因：无边框窗口用边缘拖拽缩放，撤下右下角单独尺寸柄。
@@ -269,6 +305,9 @@ class MainWindow(DesktopWindow):
         search = self.search if self.stack.currentIndex() == self.PAGE_PRODUCTS else (
             self.erp_records_page.search if self.stack.currentIndex() == self.PAGE_LOGS
             and self.logs_page.is_transfer_tab() else None)
+        # 2026-10-13：本次修改原因：新方案库沿用 Ctrl+F 搜索习惯。
+        if self.stack.currentIndex() == self.PAGE_REFERENCES:
+            search = self.reference_analysis_page.search
         if search:
             # 2026-10-13：本次修改原因：默认收起筛选后，Ctrl+F 先展开再聚焦，搜索入口保持可用。
             if search is self.search:
@@ -300,16 +339,23 @@ class MainWindow(DesktopWindow):
         # layout.addSpacing(6)
         layout.addSpacing(20)
         self.navigation = QButtonGroup(self)
-        for index, (text, symbol) in enumerate([
+        # for index, (text, symbol) in enumerate([
             # 2026-10-11：本次修改原因：统一设置入口容纳插件连接与模型管理。
             # 2026-10-12：本次修改原因：导航按加工、获取记录、回传结果、设置和帮助排列。
             # ("商品加工", "products"), ("采集记录", "capture"), ("回传记录", "export"),
             # ("设置", "settings"), ("操作帮助", "capture"),
             # 2026-10-13：本次修改原因：将历史查询合成日志记录，帮助放入设置，减少侧栏入口数量。
-            ("商品加工", "products"), ("日志记录", "capture"), ("设置", "settings"),
+        #     ("商品加工", "products"), ("日志记录", "capture"), ("设置", "settings"),
             # 2026-10-13：本次修改原因：回收站在侧栏始终可发现，补齐选择恢复及永久删除操作链路。
-            ("回收站", "capture"),
-        ]):
+        #     ("回收站", "capture"),
+        # ]):
+        # 2026-10-13：本次修改原因：爆款参考与商品加工相邻，日志及配置保持集中，使用稳定页面编号。
+        for index, text, symbol in [
+            (self.PAGE_PRODUCTS, "商品加工", "products"),
+            (self.PAGE_REFERENCES, "爆款分析", "analysis"),
+            (self.PAGE_TRACKING, "包裹追踪", "tracking"),
+            (self.PAGE_HOSTING, "图床", "hosting"),
+        ]:
             item = button(text)
             item.setObjectName("navButton")
             item.setCheckable(True)
@@ -323,6 +369,27 @@ class MainWindow(DesktopWindow):
                 item.setChecked(True)
         self.navigation.idClicked.connect(self.navigate)
         layout.addStretch()
+        # 2026-10-14：本次修改原因：日志、设置、回收站属于低频系统入口，移到底部水平排列并仅保留图标。
+        footer = QHBoxLayout()
+        footer.setSpacing(4)
+        for index, text, symbol in [
+            (self.PAGE_LOGS, "日志记录", "logs"),
+            (self.PAGE_SETTINGS, "设置", "settings"),
+            (self.PAGE_RECYCLE, "回收站", "trash"),
+        ]:
+            item = button("")
+            item.setObjectName("navButton")
+            item.setCheckable(True)
+            item.setProperty("iconOnly", True)
+            item.setProperty("navSymbol", symbol)
+            item.setToolTip(text)
+            item.setAccessibleName(text)
+            item.setFixedSize(42, 38)
+            item.setIcon(icon(symbol, theme_tokens()["muted"]))
+            self.navigation.addButton(item, index)
+            footer.addWidget(item)
+        footer.addStretch()
+        layout.addLayout(footer)
         # layout.addWidget(label("LOCAL WORKSPACE", "navCaption"))
         # layout.addWidget(label("v0.1.0  /  本机桌面版", "navCaption"))
         # 2026-10-12：本次修改原因：统一商品加工入口、来源和反馈链路。
@@ -339,6 +406,16 @@ class MainWindow(DesktopWindow):
                 item.setIcon(icon(item.property("navSymbol"), theme_tokens()["muted"]))
 
     def navigate(self, index: int) -> None:
+        # 2026-10-13：本次修改原因：方案未保存或分析中切页也有保护，不丢弃用户输入。
+        if self.stack.currentIndex() == self.PAGE_REFERENCES and index != self.PAGE_REFERENCES:
+            if not self.reference_analysis_page.can_leave():
+                self.navigation.button(self.PAGE_REFERENCES).setChecked(True)
+                return
+        # 2026-10-13：本次修改原因：切换导航同样检查未保存内容和 AI 任务，避免页面式编辑绕过原关闭保护。
+        editor = getattr(self, "product_editor", None)
+        if editor is not None and not editor.reject():
+            self.navigation.button(self.PAGE_PRODUCTS).setChecked(True)
+            return
         self.stack.setCurrentIndex(index)
         self.navigation.button(index).setChecked(True)
         # if index == 3:
@@ -350,6 +427,12 @@ class MainWindow(DesktopWindow):
         # if index == 5:
         if index == self.PAGE_RECYCLE:
             self.recycle_bin_page.refresh()
+        # 2026-10-13：本次修改原因：进入方案库刷新列表与模型配置，不重置编辑草稿。
+        if index == self.PAGE_REFERENCES:
+            self.reference_analysis_page.refresh()
+        # 2026-10-14：本次修改原因：每次进入图床页展示最新同步结果与手动上传记录。
+        if index == self.PAGE_HOSTING:
+            self.image_hosting_page.refresh()
 
     def _heading(self, title: str, subtitle: str) -> tuple[QHBoxLayout, QVBoxLayout]:
         row = QHBoxLayout()
@@ -761,7 +844,9 @@ class MainWindow(DesktopWindow):
             text += "\n\n采集提示\n" + "\n".join("• " + warning.replace("实际导出售价", "实际售价") for warning in product.warnings)
         count = local_picture_count(product)
         if count:
-            text += f"\n\n素材待处理\n• {count} 张本机图片；写回涉及这些图片时需先替换为公网链接。"
+            # text += f"\n\n素材待处理\n• {count} 张本机图片；写回涉及这些图片时需先替换为公网链接。"
+            # 2026-10-14：本次修改原因：本机已采用图片在同步时自动托管，检查提示与真实操作一致。
+            text += f"\n\n本机素材\n• {count} 张图片；同步 ERP 时自动上传图床并替换提交链接。"
         return text
 
     def show_product_notice(self) -> None:
@@ -1003,13 +1088,23 @@ class MainWindow(DesktopWindow):
         self.settings_tabs.addTab(self._route_settings_page(), "采集路线")
         self.settings_tabs.addTab(self._erp_settings_page(), "妙手 ERP")
         self.model_settings = ModelSettingsPage(self.model_config, self.assets, self.ai_hub, self)
+        # 2026-10-14：本次修改原因：图床凭证集中在设置页维护，其他页面只显示状态和执行同步。
+        self.image_hosting_settings = ImageHostingConfigPage(
+            self.image_hosting_store, self.image_hosting_service, self.ai_hub, self)
+        # self.settings_tabs.addTab(self.image_hosting_settings, "图床")
+        # 2026-10-14：本次修改原因：保留现有 AI 模型和插件连接标签索引，图床设置排在连接设置之后。
         self.settings_tabs.addTab(self.model_settings, "AI 模型")
         self.settings_tabs.addTab(self._connection_settings_page(), "插件连接（备用）")
+        self.settings_tabs.addTab(self.image_hosting_settings, "图床")
         # 2026-10-13：本次修改原因：操作帮助放入设置末尾，原四组设置索引保持不变。
         self.help_page = HelpPage(self)
         self.settings_tabs.addTab(self.help_page, "操作帮助")
         # 2026-10-13：本次修改原因：系统追加在操作帮助之后，保留所有既有分组索引和跳转。
+        # self.settings_tabs.addTab(self._system_settings_page(), "系统")
+        # 2026-10-14：本次修改原因：新增类目、生成方案与建档预设设置页，保持旧编号。
         self.settings_tabs.addTab(self._system_settings_page(), "系统")
+        self.listing_settings = ListingSettingsPage(self.listing_defaults_store, self)
+        self.settings_tabs.addTab(self.listing_settings, "白底图 Listing")
         # layout.addWidget(self.settings_tabs, 1)
         # 2026-10-13：本次修改原因：设置分组固定在左侧，内容分栏可拖动，原四个标签与跳转索引保持一致。
         from PySide6.QtWidgets import QListWidget
@@ -1820,16 +1915,86 @@ class MainWindow(DesktopWindow):
             product = self.repository.product(self.current_product.id)
             # if product and ProductEditor(self.repository, product, self.network, self).exec() == QDialog.DialogCode.Accepted:
             # 2026-10-11：本次修改原因：采集商品编辑调用共用 AI 服务，表单应用后再由用户保存。
-            if product and ProductEditor(self.repository, product, self.network, self,
-                                         ai_service=self.ai_service, ai_hub=self.ai_hub).exec() == QDialog.DialogCode.Accepted:
-                self.refresh()
-                # self.statusBar().showMessage("商品已保存，编辑版本已记录", 6000)
-                # 2026-10-12：本次修改原因：保存后明确当前版本的审核状态及下一步。
-                saved = self.repository.product(product.id)
-                self.operation_feedback.setText(
-                    "商品已保存并审核，可检查并回传 ERP。" if saved and saved.status == "已审核"
-                    else "修改已保存。补齐待完善项并审核当前版本后，再传回 ERP。")
-                self.statusBar().showMessage("商品已保存，编辑版本已记录", 6000)
+            # if product and ProductEditor(self.repository, product, self.network, self,
+            #                              ai_service=self.ai_service, ai_hub=self.ai_hub).exec() == QDialog.DialogCode.Accepted:
+            #     self.refresh()
+            #     saved = self.repository.product(product.id)
+            #     self.operation_feedback.setText(
+            #         "商品已保存并审核，可检查并回传 ERP。" if saved and saved.status == "已审核"
+            #         else "修改已保存。补齐待完善项并审核当前版本后，再传回 ERP。")
+            #     self.statusBar().showMessage("商品已保存，编辑版本已记录", 6000)
+            # 2026-10-13：本次修改原因：采集商品在主窗口内编辑，保存结果由页面关闭回调统一反馈。
+            if product:
+                self.open_product_editor(product)
+
+    # 2026-10-13：本次修改原因：两条编辑入口共用内嵌页面，筛选/来源/排序控件留在原列表页，不重复创建。
+    def open_product_editor(self, product: Product) -> None:
+        if getattr(self, "product_editor", None) is not None:
+            self.stack.setCurrentWidget(self.product_editor)
+            return
+        table = self.product_table
+        context = {
+            "current_id": self.current_product.id if self.current_product else product.id,
+            "column": max(0, table.currentIndex().column()),
+            "selected_ids": {index.data(Qt.ItemDataRole.UserRole)
+                             for index in table.selectionModel().selectedRows()},
+            "checked_ids": set(self.checked_ids),
+            "horizontal": table.horizontalScrollBar().value(),
+            "vertical": table.verticalScrollBar().value(),
+        }
+        # editor = ProductEditor(self.repository, product, self.network, self,
+        #                        ai_service=self.ai_service, ai_hub=self.ai_hub)
+        # 2026-10-13：本次修改原因：采集/白底图商品共用统一 AI 页与已保存爆款方案库。
+        editor = ProductEditor(self.repository, product, self.network, self,
+                               ai_service=self.ai_service, ai_hub=self.ai_hub, reference_store=self.reference_store)
+        self.product_editor = editor
+        editor.closed.connect(lambda result: self.finish_product_edit(editor, result, context))
+        self.stack.addWidget(editor)
+        self.stack.setCurrentWidget(editor)
+        self.navigation.button(self.PAGE_PRODUCTS).setChecked(True)
+        editor.back_button.setFocus()
+
+    # 2026-10-13：本次修改原因：保存沿用原刷新/审核反馈；返回复用列表控件，恢复勾选及滚动位置。
+    def finish_product_edit(self, editor: ProductEditor, result: int, context: dict) -> None:
+        if editor is not getattr(self, "product_editor", None):
+            return
+        self.product_editor = None
+        self.stack.setCurrentIndex(self.PAGE_PRODUCTS)
+        self.navigation.button(self.PAGE_PRODUCTS).setChecked(True)
+        self.stack.removeWidget(editor)
+        editor.hide()
+        editor.deleteLater()
+        self.checked_ids = set(context["checked_ids"])
+        if result == QDialog.DialogCode.Accepted:
+            self.refresh()
+            saved = self.repository.product(editor.product.id)
+            self.operation_feedback.setText(
+                "商品已保存并审核，可检查并回传 ERP。" if saved and saved.status == "已审核"
+                else "修改已保存。补齐待完善项并审核当前版本后，再传回 ERP。")
+            self.statusBar().showMessage("商品已保存，编辑版本已记录", 6000)
+        else:
+            # 接收服务可能在编辑期间更新了隐藏列表；按原勾选集合重新绘制，不改动商品数据。
+            self.populate_products()
+        self.restore_product_list_context(context)
+        # 页面切回后的布局可能重算滚动范围，下一轮事件再次恢复最终位置。
+        QTimer.singleShot(0, lambda: self.restore_product_list_context(context)
+                          if self.product_editor is None else None)
+
+    # 2026-10-13：本次修改原因：刷新可能改变行号，按稳定商品 ID 恢复当前行/多选；已不符合筛选的商品不强行显示。
+    def restore_product_list_context(self, context: dict) -> None:
+        table = self.product_table
+        selection = table.selectionModel()
+        selection.clearSelection()
+        for row in range(table.rowCount()):
+            index = table.model().index(row, context["column"])
+            product_id = index.data(Qt.ItemDataRole.UserRole)
+            if product_id == context["current_id"]:
+                selection.setCurrentIndex(index, QItemSelectionModel.SelectionFlag.NoUpdate)
+            if product_id in context["selected_ids"]:
+                selection.select(index, QItemSelectionModel.SelectionFlag.Select | QItemSelectionModel.SelectionFlag.Rows)
+        table.horizontalScrollBar().setValue(context["horizontal"])
+        table.verticalScrollBar().setValue(context["vertical"])
+        self.product_selected()
 
     # 2026-10-12：本次修改原因：API 导入自动关联原商品，返回商品库定位最后导入项，编辑与 AI 不需要另写流程。
     def import_miaoshou(self) -> None:
@@ -1880,7 +2045,10 @@ class MainWindow(DesktopWindow):
 
     # 2026-10-11：本次修改原因：上传商品与采集商品共用编辑、版本和 AI 处理流程。
     def create_from_photos(self) -> None:
-        creation = ProductCreation(self.repository, self.assets, self)
+        # creation = ProductCreation(self.repository, self.assets, self)
+        # 2026-10-14：本次修改原因：上传前读取配置并检查模型，失败不创建半成品。
+        creation = ProductCreation(self.repository, self.assets, self,
+            defaults_store=self.listing_defaults_store, ai_service=self.ai_service)
         if creation.exec() != QDialog.DialogCode.Accepted or not creation.created_product:
             return
         # self.current_product = creation.created_product
@@ -1899,13 +2067,21 @@ class MainWindow(DesktopWindow):
         # 2026-10-13：本次修改原因：自上传商品通过列表定位和缩略图显示，不再访问右侧速览。
         self.refresh()
         product = creation.created_product
-        editor = ProductEditor(self.repository, product, self.network, self,
-                               ai_service=self.ai_service, ai_hub=self.ai_hub)
-        editor.exec()
-        self.refresh()
-        # self.statusBar().showMessage("上传商品草稿已保存在商品库", 6000)
+        # editor = ProductEditor(self.repository, product, self.network, self,
+        #                        ai_service=self.ai_service, ai_hub=self.ai_hub)
+        # editor.exec()
+        # self.refresh()
+        # 2026-10-13：本次修改原因：自上传商品与采集商品进入同一编辑页面，返回仍定位白底图列表。
+        # self.open_product_editor(product)
+        # # self.statusBar().showMessage("上传商品草稿已保存在商品库", 6000)
+        # 2026-10-14：本次修改原因：仅明确点击创建并生成时自动启动；普通商品编辑不调用模型。
+        self.open_product_editor(product)
+        if creation.generate_listing:
+            self.product_editor.start_white_listing(creation.defaults)
         # 2026-10-12：本次修改原因：自上传路线明确草稿和公网素材要求。
-        self.operation_feedback.setText("自上传商品已建档，可继续 AI 加工。白底图及生成图回传前需转换为公网链接。")
+        # self.operation_feedback.setText("自上传商品已建档，可继续 AI 加工。白底图及生成图回传前需转换为公网链接。")
+        # 2026-10-14：本次修改原因：已采用的本机图片在同步 ERP 时自动托管，提示与实际操作保持一致。
+        self.operation_feedback.setText("自上传商品已建档，可继续 AI 加工。保存并审核后，同步 ERP 时会自动托管已采用的本机图片。")
         self.statusBar().showMessage("上传商品草稿已保存在商品加工", 6000)
 
     def open_source(self) -> None:
@@ -2085,7 +2261,9 @@ class MainWindow(DesktopWindow):
             #     f"{product.title or product.source_id}：{product.review_issues()[0]}" for product in invalid[:12]))
             # 2026-10-12：本次修改原因：批量审核汇总所有已知问题，长清单放详情而不是只显示每件商品第一个错误。
             details = "\n\n".join(f"{product.title or product.source_id}：\n" + "\n".join(
-                f"• {issue}" for issue in product.review_issues()) for product in invalid)
+                # f"• {issue}" for issue in product.review_issues()) for product in invalid)
+                # 2026-10-14：本次修改原因：批量审核错误也能定位补充字段。
+                "• " + explain_issue(issue) for issue in product.review_issues()) for product in invalid)
             notice = QMessageBox(self)
             notice.setIcon(QMessageBox.Icon.Warning)
             notice.setWindowTitle("请先完善商品")
@@ -2173,13 +2351,17 @@ class MainWindow(DesktopWindow):
             return
         mode = self.settings.erp_transfer_mode
         if self.erp_service.unavailable_reason:
-            QMessageBox.information(self, "请先配置妙手 ERP", self.erp_service.unavailable_reason)
+            # QMessageBox.information(self, "请先配置妙手 ERP", self.erp_service.unavailable_reason)
+            # 2026-10-14：本次修改原因：未配凭证明确设置栏目。
+            QMessageBox.information(self, "请先配置妙手 ERP", explain_errors(self.erp_service.unavailable_reason))
             self.open_settings(1)
             return
         problems = []
         for product_id in dict.fromkeys(product_ids):
             product = self.repository.product(product_id)
-            issues = self.erp_service.issues(product, mode) if product else ["商品不存在，请刷新。"]
+            # issues = self.erp_service.issues(product, mode) if product else ["商品不存在，请刷新。"]
+            # 2026-10-14：本次修改原因：回传问题清单指向字段、配置及日志具体位置。
+            issues = [explain_issue(issue) for issue in self.erp_service.issues(product, mode)] if product else ["商品不存在，请刷新。"]
             if any(row["product_id"] == product_id and row["state"] in {"sending", "unknown"} for row in self._erp_records):
                 issues.append("已有回传进行中或结果未知，请先到回传记录核对。")
             if issues:
@@ -2199,7 +2381,9 @@ class MainWindow(DesktopWindow):
             # 2026-10-12：本次修改原因：本机记录保存失败不能误报已留档。
             if record_errors:
                 details += "\n\n回传记录未能完整保存：\n" + "\n".join(record_errors)
-            notice.setInformativeText("\n".join(details.splitlines()[:10]) + "\n完整问题可展开详情查看。")
+            # notice.setInformativeText("\n".join(details.splitlines()[:10]) + "\n完整问题可展开详情查看。")
+            # 2026-10-14：本次修改原因：首屏显示具体补充位置，完整问题保留在详情。
+            notice.setInformativeText("\n".join(details.splitlines()[:16]) + "\n完整问题和处理位置可展开详情查看。")
             notice.setDetailedText(details)
             process = notice.addButton("进入商品加工", QMessageBox.ButtonRole.ActionRole)
             records = notice.addButton("查看回传记录", QMessageBox.ButtonRole.ActionRole)
@@ -2497,6 +2681,15 @@ class MainWindow(DesktopWindow):
         if self._tasks or self.ai_hub.busy:
             # 2026-10-12：本次修改原因：关闭提示覆盖同步、回传、核对及 AI 任务。
             QMessageBox.information(self, "任务正在进行", "请等待当前同步、回传、核对或 AI 任务完成后再关闭。")
+            event.ignore()
+            return
+        # 2026-10-13：本次修改原因：关闭主窗口也须确认编辑页未保存内容，不因移除弹窗而丢失保护。
+        editor = getattr(self, "product_editor", None)
+        if editor is not None and not editor.reject():
+            event.ignore()
+            return
+        # 2026-10-13：本次修改原因：关闭应用前同样保护独立爆款方案的未保存编辑。
+        if not self.reference_analysis_page.can_leave():
             event.ignore()
             return
         # 2026-10-13：本次修改原因：退出前保存正常布局和列宽，不保存临时最大化状态。

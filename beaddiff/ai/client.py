@@ -15,9 +15,12 @@ from .config import ModelProfile
 
 
 class ModelCallError(ValueError):
-    def __init__(self, message: str, status: int = 0):
+    # def __init__(self, message: str, status: int = 0):
+    # 2026-10-14：本次修改原因：保留上游状态和 request id，便于区分产能限流、额度错误与网络错误。
+    def __init__(self, message: str, status: int = 0, request_id: str = "", route: str = ""):
         super().__init__(message)
-        self.status = status
+        # self.status = status
+        self.status, self.request_id, self.route = status, request_id, route
 
 
 def endpoint(base: str, route: str) -> str:
@@ -147,6 +150,27 @@ class CompatibleClient:
         text = re.sub(r"(?i)(?:bearer\s+|sk-)[A-Za-z0-9_\-\.]+", "[密钥已隐藏]", text)
         return text[:600]
 
+    # 2026-10-14：本次修改原因：把服务商 429 的产能提示翻译成可操作的中文，并保留 request id。
+    def _http_error(self, status: int, detail: str, request_id: str, route: str) -> ModelCallError:
+        detail = self._safe(detail or "接口未返回可解析的错误信息")
+        # capacity_words = ("产能", "capacity", "overload", "temporarily unavailable", "too many requests")
+        # 2026-10-14：本次修改原因：普通限流不等于图片产能不足，文本请求也不能显示图片服务错误。
+        capacity_words = ("产能", "capacity", "overload", "temporarily unavailable")
+        if status == 429 and any(word.lower() in detail.lower() for word in capacity_words):
+            # message = "图片服务暂时没有可用产能，可能是上游图片编辑限流；请稍后点击‘重试失败任务’，不会自动重复计费。"
+            # 2026-10-14：本次修改原因：仅说明软件不自动重试，不能承诺服务商不会对手动重试计费。
+            service_name = "图片服务" if self.profile.category == "image" or route.startswith("images/") else "模型服务"
+            message = f"{service_name}暂时没有可用产能（HTTP 429），软件不会自动重试；请稍后手动重试。"
+        elif status == 429:
+            message = "模型接口返回 HTTP 429，可能是服务商限流或该模型的独立额度限制；请稍后手动重试。"
+        else:
+            message = f"模型接口返回 HTTP {status}：{detail}"
+        if detail and detail not in message:
+            message += f" 上游提示：{detail}"
+        if request_id:
+            message += f"（request id: {request_id}）"
+        return ModelCallError(message, status, request_id, route)
+
     def _request(self, route: str, body: dict | None = None, files=None, form=None, method: str = "POST") -> dict:
         headers = {"Authorization": "Bearer " + self.profile.key, "Accept": "application/json"}
         try:
@@ -155,12 +179,18 @@ class CompatibleClient:
                 response = client.request(method, endpoint(self.profile.url, route), headers=headers,
                                           json=body, files=files, data=form)
             if not response.is_success:
+                request_id = (response.headers.get("x-request-id") or response.headers.get("request-id")
+                              or response.headers.get("openai-request-id") or "").strip()
                 try:
                     data = response.json()
                     detail = (data.get("error") or {}).get("message", "") if isinstance(data.get("error"), dict) else data.get("message", "")
+                    # 2026-10-14：本次修改原因：兼容服务可能只在 JSON 中返回 request id，不能只依赖响应头。
+                    request_id = request_id or str(data.get("request_id") or data.get("requestId") or "").strip()
                 except (ValueError, AttributeError):
                     detail = "接口未返回可解析的错误信息"
-                raise ModelCallError(f"模型接口返回 HTTP {response.status_code}：{self._safe(str(detail))}", response.status_code)
+                # raise ModelCallError(f"模型接口返回 HTTP {response.status_code}：{self._safe(str(detail))}", response.status_code)
+                # 2026-10-14：本次修改原因：将 HTTP 状态、路由和 request id 统一交给可识别的错误对象处理。
+                raise self._http_error(response.status_code, str(detail), request_id, route)
             try:
                 result = response.json()
             except ValueError as error:

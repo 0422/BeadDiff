@@ -17,6 +17,8 @@ from .models import Product, SKU, valid_url
 from .miaoshou_config import MiaoshouConfig
 # 2026-10-12：本次修改原因：草稿校验允许受管理的白底图/AI 本机素材，回传阶段仍要求网络图片。
 from .assets import valid_media_url
+# 2026-10-14：本次修改原因：构造待上传请求时只暂准受管理的本机图片，最终提交仍校验公网链接。
+from .assets import local_asset_path
 
 
 # 2026-10-12：本次修改原因：仅改变表单中实际编辑的字段，防止 Qt 规范化 HTML/空格/规格字典连带覆盖远端数据。
@@ -476,7 +478,9 @@ def _supply_price(product: Product, config: MiaoshouConfig) -> float:
     raise ValueError("新增商品必须有独立货源价；请在编辑商品 → 货源链接填写回传货源价（使用商品当前币种），SKU 售价不能代填。")
 
 
-def create_payload(product: Product, config: MiaoshouConfig) -> dict:
+# def create_payload(product: Product, config: MiaoshouConfig) -> dict:
+# 2026-10-14：本次修改原因：ERP 同步可先构造含本机图片的请求，完成图床替换后再严格校验。
+def create_payload(product: Product, config: MiaoshouConfig, *, allow_local_images: bool = False) -> dict:
     # 2026-10-12：本次修改原因：API 商品新增副本以完整远端字段为基础，保留第三规格、图片组、多货源及多附件。
     if product.erp_imported:
         if product.erp_original_account != config.account_id or not product.erp_remote_snapshot:
@@ -485,10 +489,12 @@ def create_payload(product: Product, config: MiaoshouConfig) -> dict:
         # 2026-10-12：本次修改原因：新增副本基于首次导入原文合并全部加工字段，不使用上次更新后的增量基线。
         copy_product = Product.from_dict(product.to_dict())
         copy_product.erp_update_baseline = deepcopy(product.erp_import_baseline or product.erp_update_baseline)
-        result, _ = update_payload(copy_product, product.erp_remote_snapshot, config)
+        # result, _ = update_payload(copy_product, product.erp_remote_snapshot, config)
+        result, _ = update_payload(copy_product, product.erp_remote_snapshot, config, allow_local_images=allow_local_images)
         if result.get("price") in (None, ""):
             result["price"] = _supply_price(product, config)
-        validate_payload(result, require_price=True)
+        # validate_payload(result, require_price=True)
+        validate_payload(result, require_price=True, allow_local_images=allow_local_images)
         return result
     result = {
         "title": product.title, "itemNum": product.main_code, "notesText": product.simple_description,
@@ -550,7 +556,8 @@ def create_payload(product: Product, config: MiaoshouConfig) -> dict:
     _prepare_source_links(result)
     # validate_payload(result)
     # 2026-10-12：本次修改原因：新增请求必须有顶层 price，与更新保留远端原值的校验分开。
-    validate_payload(result, require_price=True)
+    # validate_payload(result, require_price=True)
+    validate_payload(result, require_price=True, allow_local_images=allow_local_images)
     return result
 
 
@@ -583,7 +590,10 @@ def match_sku_links(product: Product, origin: Product, remote: dict) -> dict[str
     return links
 
 
-def update_payload(product: Product, remote: dict, config: MiaoshouConfig) -> tuple[dict, dict[str, str]]:
+# def update_payload(product: Product, remote: dict, config: MiaoshouConfig) -> tuple[dict, dict[str, str]]:
+# 2026-10-14：本次修改原因：更新原商品的已选本机图片也经图床转存，未修改字段仍沿用远端值。
+def update_payload(product: Product, remote: dict, config: MiaoshouConfig, *,
+                   allow_local_images: bool = False) -> tuple[dict, dict[str, str]]:
     result = {key: deepcopy(value) for key, value in remote.items() if key in EDITABLE_KEYS}
     fields = edited_fields(product)
     unsupported = fields & {"category", "body_size_chart"}
@@ -733,7 +743,8 @@ def update_payload(product: Product, remote: dict, config: MiaoshouConfig) -> tu
         result.pop("mainImgAppVideoId", None)
     if "currency" in fields and product.supply_price:
         result["price"] = money(product.supply_price, product.currency, config, "货源价")
-    validate_payload(result)
+    # validate_payload(result)
+    validate_payload(result, allow_local_images=allow_local_images)
     return result, links
 
 
@@ -752,7 +763,9 @@ def picture_urls(payload: dict) -> list[str]:
 
 # def validate_payload(payload: dict) -> None:
 # 2026-10-12：本次修改原因：新增必填价独立校验，更新不因远端历史数据缺项阻断无关字段修改。
-def validate_payload(payload: dict, require_price: bool = False) -> None:
+# def validate_payload(payload: dict, require_price: bool = False) -> None:
+# 2026-10-14：本次修改原因：仅准备阶段接受受管理本机图片；视频和附件始终要求公网链接。
+def validate_payload(payload: dict, require_price: bool = False, *, allow_local_images: bool = False) -> None:
     if not isinstance(payload.get("title"), str) or not payload["title"].strip():
         raise ValueError("公共采集箱产品标题不能为空。")
     # limits = {"title": 255, "itemNum": 255, "notesText": 65536, "notes": 100000,
@@ -793,7 +806,9 @@ def validate_payload(payload: dict, require_price: bool = False) -> None:
     for key in ("sizeMap", "saleProp3Map"):
         if any(len(str(option.get("name") or "")) > 255 for option in (payload.get(key) or {}).values()):
             raise ValueError("规格名称最多支持 255 个字符。")
-    urls = picture_urls(payload)
+    # urls = picture_urls(payload)
+    image_urls = picture_urls(payload)
+    urls = [url for url in image_urls if not (allow_local_images and isinstance(url, str) and local_asset_path(url))]
     urls += [payload[key] for key in ("mainImgVideoUrl",) if payload.get(key)]
     urls += [row.get("fileUrl", "") for row in payload.get("productCertifications") or []]
     guide = payload.get("guideInfo") or {}

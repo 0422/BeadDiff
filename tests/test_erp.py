@@ -190,3 +190,25 @@ def test_restart_keeps_interrupted_transfer_unknown(tmp_path):
     adapter = TestAdapter()
     result = ERPService(restarted, adapter).transfer([product.id], "create")
     assert result[0]["state"] == "blocked" and not adapter.requests
+
+
+# 2026-10-14：本次修改原因：回传前明确指出本机图片托管步骤，并确保拦截后不会请求真实或模拟提交接口。
+def test_local_picture_preflight_explains_hosting_and_never_submits(tmp_path):
+    from io import BytesIO
+    from PIL import Image
+    from beaddiff.assets import AssetStore
+    raw = BytesIO()
+    Image.new("RGB", (16, 16), "white").save(raw, format="PNG")
+    local = AssetStore(tmp_path).save(raw.getvalue())
+    repository = Repository(tmp_path)
+    product = stored_product(repository)
+    product.images = [local.uri]
+    product = repository.save_product(product, approve=True)
+    adapter = TestAdapter()
+    service = ERPService(repository, adapter)
+    results = service.transfer([product.id], "create")
+    assert results[0]["state"] == "blocked"
+    assert "自动托管尚未接入" in results[0]["message"]
+    assert "HTTP/HTTPS" in results[0]["message"]
+    assert "保存审核后回传" in results[0]["message"]
+    assert not adapter.requests

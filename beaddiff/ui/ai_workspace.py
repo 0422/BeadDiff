@@ -11,6 +11,10 @@ from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QFormLayout, QHBoxLayout, QListWidget, QListWidgetItem,
     QMessageBox, QPlainTextEdit, QScrollArea, QSpinBox, QSplitter, QVBoxLayout, QWidget,
 )
+# 2026-10-13：本次修改原因：窄侧栏内输入控件自适应宽度，滚动区域去掉系统边框和横向滚动。
+from PySide6.QtWidgets import QFrame, QSizePolicy, QLayout
+# 2026-10-13：本次修改原因：窄侧栏的参数与候选分标签展示，避免上下分栏把预览压成不足一行。
+from PySide6.QtWidgets import QTabWidget
 
 from ..ai.contracts import AIRequest, AIResult
 from ..ai.service import AIService, facts
@@ -19,7 +23,9 @@ from .ai_runner import TaskHub
 # 2026-10-13：本次修改原因：AI 输入/候选区域复用可记忆分栏，生成请求和应用规则保持原样。
 from .layout_support import PersistentSplitter, Panel, save_splitters
 from .media_list import MediaList
-from .model_settings import ModelSettingsDialog
+# from .model_settings import ModelSettingsDialog
+# 2026-10-14：本次修改原因：业务页面不再打开模型设置弹窗。
+# 模型配置统一从设置页进入。
 from .widgets import ImagePreview, button, label
 
 
@@ -45,20 +51,47 @@ class AIWorkspace(QDialog):
         self.resize(1280, 850)
         self.setMinimumSize(1100, 700)
         root = QVBoxLayout(self)
+        # 2026-10-13：本次修改原因：AI 工作区内嵌页面后统一卡片留白，手动 Prompt 独立置顶，首屏即可输入。
+        self.setObjectName("aiWorkspace")
+        root.setContentsMargins(12, 12, 12, 12)
+        root.setSpacing(8)
         heading = QHBoxLayout()
         heading.addWidget(label(TITLES[operation], "sectionTitle"))
         heading.addStretch()
-        self.settings_button = button("模型设置", self.configure_models)
-        heading.addWidget(self.settings_button)
+        # self.settings_button = button("模型设置", self.configure_models)
+        # heading.addWidget(self.settings_button)
+        # 2026-10-14：本次修改原因：清理旧兼容面板中的重复设置入口。
+# 模型配置统一从设置页进入。
         root.addLayout(heading)
+        self.instruction = QPlainTextEdit()
+        self.instruction.setObjectName("aiPrompt")
+        self.instruction.setAccessibleName("手动提示词（Prompt）")
+        self.instruction.setPlaceholderText("输入本次生成要求，例如：突出已确认的卖点；保留商品主体，参考爆款图的光影和排布。")
+        self.instruction.setMinimumHeight(84)
+        self.instruction.setMaximumHeight(110)
+        self.instruction.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        root.addWidget(label("手动提示词（Prompt）", "panelTitle"))
+        root.addWidget(self.instruction)
         # splitter = QSplitter()
         # 2026-10-13：本次修改原因：内嵌到编辑器右侧时上下排列，避免窄侧栏塞入两列图片工具。
-        splitter = PersistentSplitter(Qt.Orientation.Vertical, "ui/ai_workspace/input_output_splitter_v1", [420, 380], self)
+        # splitter = PersistentSplitter(Qt.Orientation.Vertical, "ui/ai_workspace/input_output_splitter_v1", [420, 380], self)
+        # 2026-10-13：本次修改原因：Prompt 保持首屏可见，下面的参数/参考素材与候选共享整块可用高度。
+        self.workspace_tabs = QTabWidget()
         inputs = QWidget()
         left = QVBoxLayout(inputs)
+        # 2026-10-13：本次修改原因：内容适应 AI 栏宽度，长模型名不再撑出横向滚动条。
+        left.setContentsMargins(2, 2, 2, 2)
+        left.setSpacing(8)
         form = QFormLayout()
-        self.models = QComboBox()
-        form.addRow("本次模型", self.models)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+        form.setHorizontalSpacing(10)
+        form.setVerticalSpacing(8)
+        # self.models = QComboBox()
+        # form.addRow("本次模型", self.models)
+        # 2026-10-14：本次修改原因：兼容页面只展示当前配置。
+        self.models = label("", "hint", True)
+        form.addRow("当前模型", self.models)
         self.language = QComboBox()
         self.language.setEditable(True)
         self.language.addItems(["English", "中文", "Deutsch", "Français", "日本語", "Español"])
@@ -74,11 +107,11 @@ class AIWorkspace(QDialog):
         if self.is_image:
             form.addRow("期望图片尺寸", self.size)
         left.addLayout(form)
-        self.instruction = QPlainTextEdit()
-        self.instruction.setPlaceholderText("例如：保留商品主体，参考爆款图的柔和光影和场景；突出已确认的商品卖点。")
-        self.instruction.setMinimumHeight(95)
-        left.addWidget(label("处理要求 / Prompt", "hint"))
-        left.addWidget(self.instruction)
+        # self.instruction = QPlainTextEdit()
+        # self.instruction.setPlaceholderText("例如：保留商品主体，参考爆款图的柔和光影和场景；突出已确认的商品卖点。")
+        # self.instruction.setMinimumHeight(95)
+        # left.addWidget(label("处理要求 / Prompt", "hint"))
+        # left.addWidget(self.instruction)
         left.addWidget(label("爆款参考文案 / 提炼后的风格", "hint"))
         self.reference_text = QPlainTextEdit()
         self.reference_text.setPlaceholderText("粘贴参考标题、描述，或已提炼的风格 Prompt")
@@ -99,11 +132,15 @@ class AIWorkspace(QDialog):
         # self.subjects = MediaList([initial] if initial and self.is_image else [], product.get("image_sizes", {}), service.assets)
         # 2026-10-11：本次修改原因：白底图看图写文案也能使用主体图，纯文本任务可关闭图片理解。
         self.subjects = MediaList([initial] if initial else [], product.get("image_sizes", {}), service.assets)
-        self.use_subject = QCheckBox("结合商品主体图写文案（需文本模型支持图片理解）")
+        # self.use_subject = QCheckBox("结合商品主体图写文案（需文本模型支持图片理解）")
+        # 2026-10-13：本次修改原因：缩短窄栏复选框文字，原图片理解条件保留在工具提示中。
+        self.use_subject = QCheckBox("结合商品主体图写文案")
+        self.use_subject.setToolTip("需文本模型支持图片理解；勾选后向模型发送商品主体图。")
         self.use_subject.setChecked(product.get("source") == "upload")
         self.use_subject.setVisible(not self.is_image)
         left.addWidget(self.use_subject)
-        left.addWidget(label("商品主体图 · 多张可用于提供不同实物角度", "hint"))
+        # left.addWidget(label("商品主体图 · 多张可用于提供不同实物角度", "hint"))
+        left.addWidget(label("商品主体图 · 多张可用于提供不同实物角度", "hint", True))
         left.addWidget(self.subjects)
         self.references = MediaList([], {}, service.assets)
         left.addWidget(label("爆款风格参考图 · 与商品主体分开", "hint"))
@@ -111,7 +148,8 @@ class AIWorkspace(QDialog):
         self.analyze_button = button("分析参考 / 提炼 Prompt", self.analyze)
         left.addWidget(self.analyze_button)
         if operation == "image_set":
-            left.addWidget(label("套图用途与排布 · 每行一张，行顺序即图片顺序", "hint"))
+            # left.addWidget(label("套图用途与排布 · 每行一张，行顺序即图片顺序", "hint"))
+            left.addWidget(label("套图用途与排布 · 每行一张，行顺序即图片顺序", "hint", True))
         self.slots = QPlainTextEdit("主图：完整展示商品主体，干净背景\n场景图：展示使用场景，主体清晰\n细节图：突出实际可见的材质与结构\n卖点图：仅表现已确认的卖点，预留文案区")
         self.slots.setMinimumHeight(110)
         self.slots.setVisible(operation == "image_set")
@@ -123,21 +161,31 @@ class AIWorkspace(QDialog):
         summary = QPlainTextEdit(json.dumps(facts(product), ensure_ascii=False, indent=2))
         summary.setReadOnly(True)
         summary.setMaximumHeight(120)
-        left.addWidget(label("本次商品事实 · 如需修正，请返回商品编辑", "hint"))
+        # left.addWidget(label("本次商品事实 · 如需修正，请返回商品编辑", "hint"))
+        left.addWidget(label("本次商品事实 · 如需修正，请返回商品编辑", "hint", True))
         left.addWidget(summary)
         left.addStretch()
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
+        # 2026-10-13：本次修改原因：AI 表单只垂直滚动，不显示横纵滚动条交汇处的系统方块。
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setWidget(inputs)
+        self.input_scroll = scroll
         # 2026-10-11：本次修改原因：提交时冻结输入，重做期间保护候选次序。
         self.inputs = inputs
         # splitter.addWidget(scroll)
         scroll.setMinimumSize(0, 0)
         # splitter.addWidget(Panel("生成要求与参考素材", scroll))
         # 2026-10-13：本次修改原因：用户主动进入 AI 后展开操作表单，辅助区默认收起不隐藏正在使用的主界面。
-        splitter.addWidget(Panel("生成要求与参考素材", scroll, default_collapsed=False))
+        # splitter.addWidget(Panel("生成要求与参考素材", scroll, default_collapsed=False))
+        self.workspace_tabs.addTab(scroll, "生成设置与参考")
         outputs = QWidget()
         right = QVBoxLayout(outputs)
+        right.setContentsMargins(2, 2, 2, 2)
+        right.setSpacing(8)
+        # 2026-10-13：本次修改原因：候选页面按最小可读高度适应滚动区，不沿用创建时的空白大高度。
+        right.setSizeConstraint(QLayout.SizeConstraint.SetMinAndMaxSize)
         history_row = QHBoxLayout()
         self.history = QComboBox()
         self.history.addItem("选择历史候选…", "")
@@ -145,12 +193,22 @@ class AIWorkspace(QDialog):
         history_row.addWidget(button("载入", self.load_history))
         right.addLayout(history_row)
         self.candidates = QListWidget()
-        self.candidates.setMinimumHeight(170)
+        # self.candidates.setMinimumHeight(170)
+        # 2026-10-13：本次修改原因：侧栏候选列表保留数行可读高度，为正文预览留下空间，不改变候选数量。
+        # self.candidates.setMinimumHeight(96)
+        # self.candidates.setMaximumHeight(160)
+        # 2026-10-13：本次修改原因：紧凑候选列表让正文首屏可见；长候选以省略号呈现，完整内容在下方编辑。
+        self.candidates.setMinimumHeight(64)
+        self.candidates.setMaximumHeight(96)
+        self.candidates.setTextElideMode(Qt.TextElideMode.ElideRight)
+        self.candidates.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.candidates.currentRowChanged.connect(self.select_candidate)
         right.addWidget(self.candidates, 1)
         self.text = QPlainTextEdit()
         self.text.setPlaceholderText("生成后在这里预览和编辑候选，再应用到当前字段。")
-        self.text.setMinimumHeight(200)
+        # self.text.setMinimumHeight(200)
+        # self.text.setMinimumHeight(140)
+        self.text.setMinimumHeight(100)
         self.text.textChanged.connect(self.edit_candidate)
         right.addWidget(self.text, 1)
         self.preview = ImagePreview(network, 260)
@@ -179,11 +237,16 @@ class AIWorkspace(QDialog):
         # 2026-10-13：本次修改原因：候选区内部滚动，高 DPI/小窗口下不裁掉应用和排序控件。
         output_scroll = QScrollArea()
         output_scroll.setWidgetResizable(True)
+        output_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        output_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         output_scroll.setWidget(outputs)
+        self.output_scroll = output_scroll
         output_scroll.setMinimumSize(0, 0)
         # splitter.addWidget(Panel("候选预览与历史", output_scroll))
-        splitter.addWidget(Panel("候选预览与历史", output_scroll, default_collapsed=False))
-        root.addWidget(splitter, 1)
+        # splitter.addWidget(Panel("候选预览与历史", output_scroll, default_collapsed=False))
+        # root.addWidget(splitter, 1)
+        self.workspace_tabs.addTab(output_scroll, "候选预览与历史")
+        root.addWidget(self.workspace_tabs, 1)
         self.status = label("生成候选将留档；应用只更新编辑表单，保存商品后才形成新版本。", "hint", True)
         root.addWidget(self.status)
         footer = QHBoxLayout()
@@ -195,25 +258,38 @@ class AIWorkspace(QDialog):
         self.apply_button.setEnabled(False)
         footer.addWidget(self.apply_button)
         root.addLayout(footer)
+        # 2026-10-13：本次修改原因：模型名、图片地址和历史项以实际侧栏宽度显示，完整值保留在下拉选项中。
+        for control in (self.models, self.language, self.size, self.product_images, self.history, self.application):
+            control.setMinimumWidth(0)
+            control.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         self.reload_models()
         self.reload_history()
 
+    # def reload_models(self):
+    #     kind = "image" if self.is_image else "text"
+    #     old = self.models.currentData()
+    #     self.models.clear()
+    #     for profile in self.service.config.profiles:
+    #         if profile.category == kind and not profile.problems():
+    #             suffix = " · 当前" if profile.id == self.service.config.active[kind] else ""
+    #             self.models.addItem(profile.caption + suffix, profile.id)
+    #     selected = old or self.service.config.active[kind]
+    #     index = self.models.findData(selected)
+    #     # 没有当前项时不静默选择别的配置，用户可明确在本次模型中临时选择。
+    #     self.models.setCurrentIndex(index)
+    # 2026-10-14：本次修改原因：当前模型统一来源，不再支持业务页临时选择。
     def reload_models(self):
-        kind = "image" if self.is_image else "text"
-        old = self.models.currentData()
-        self.models.clear()
-        for profile in self.service.config.profiles:
-            if profile.category == kind and not profile.problems():
-                suffix = " · 当前" if profile.id == self.service.config.active[kind] else ""
-                self.models.addItem(profile.caption + suffix, profile.id)
-        selected = old or self.service.config.active[kind]
-        index = self.models.findData(selected)
-        # 没有当前项时不静默选择别的配置，用户可明确在本次模型中临时选择。
-        self.models.setCurrentIndex(index)
+        from ..ai.product_plan import active_model
+        try:
+            self.models.setText(active_model(self.service, "image" if self.is_image else "text").caption)
+        except ValueError:
+            self.models.setText("尚未配置，请到设置 → AI 模型选择当前模型。")
 
-    def configure_models(self):
-        ModelSettingsDialog(self.service.config, self.service.assets, self.hub, self).exec()
-        self.reload_models()
+    # def configure_models(self):
+    #     ModelSettingsDialog(self.service.config, self.service.assets, self.hub, self).exec()
+    #     self.reload_models()
+    # 2026-10-14：本次修改原因：配置入口只保留在设置页。
+    # 模型设置弹窗入口已移到设置页。
 
     def add_subject(self):
         address = self.product_images.currentData()
@@ -222,13 +298,17 @@ class AIWorkspace(QDialog):
 
     def request(self, operation: str | None = None) -> AIRequest:
         operation = operation or self.operation
-        model_id = str(self.models.currentData() or "")
-        # if operation == "reference_analysis":
-        # 2026-10-11：本次修改原因：文本页参考分析遵循本次文本模型，图片页使用当前文本模型分析。
-        if operation == "reference_analysis" and self.is_image:
-            model_id = self.service.config.active["text"]
-        if not model_id:
-            raise ValueError("请在设置中选择当前模型，或在本次模型列表中明确选择配置。")
+        # model_id = str(self.models.currentData() or "")
+        # # if operation == "reference_analysis":
+        # # 2026-10-11：本次修改原因：文本页参考分析遵循本次文本模型，图片页使用当前文本模型分析。
+        # if operation == "reference_analysis" and self.is_image:
+        #     model_id = self.service.config.active["text"]
+        # if not model_id:
+        #     raise ValueError("请在设置中选择当前模型，或在本次模型列表中明确选择配置。")
+        # 2026-10-14：本次修改原因：所有旧任务也遵循设置中的当前文本或图片模型。
+        from ..ai.product_plan import active_model
+        category = "text" if operation == "reference_analysis" or not self.is_image else "image"
+        model_id = active_model(self.service, category).id
         return AIRequest(operation, dict(self.product), model_id, self.instruction.toPlainText().strip(),
             self.language.currentText().strip(), self.reference_text.toPlainText().strip(),
             # self.subjects.toPlainText().splitlines(), self.references.toPlainText().splitlines(),
@@ -270,9 +350,13 @@ class AIWorkspace(QDialog):
     def controls_busy(self, busy: bool):
         # 2026-10-11：本次修改原因：生成使用提交时快照，避免重做期间候选行发生变化。
         self.inputs.setEnabled(not busy)
+        # 2026-10-13：本次修改原因：Prompt 移出滚动表单后仍遵守原生成中输入锁，提交快照和请求字段不变。
+        self.instruction.setEnabled(not busy)
         self.candidates.setEnabled(not busy)
         self.text.setEnabled(not busy)
-        for control in (self.generate_button, self.analyze_button, self.settings_button, self.redo,
+        # for control in (self.generate_button, self.analyze_button, self.settings_button, self.redo,
+        # 2026-10-14：本次修改原因：忙碌状态控制不再引用已移除的设置按钮。
+        for control in (self.generate_button, self.analyze_button, self.redo,
                         self.models, self.history, self.application, self.up, self.down):
             control.setEnabled(not busy)
         self.apply_button.setEnabled(not busy and self.result is not None)
@@ -309,6 +393,8 @@ class AIWorkspace(QDialog):
         QMessageBox.warning(self, "AI 任务未完成", message)
 
     def render_result(self):
+        # 2026-10-13：本次修改原因：生成完成/载入历史后自动展示候选页，不要求用户再寻找预览入口。
+        self.workspace_tabs.setCurrentWidget(self.output_scroll)
         self.candidates.blockSignals(True)
         self.candidates.clear()
         if self.result:

@@ -113,9 +113,17 @@ class ERPService:
         media += [product.video, product.certificate, product.size_chart, product.body_size_chart, product.instruction_manual]
         media += description_images(product.description_html)
         # if any(address.startswith("file:") for address in media):
-        # 2026-10-11：本次修改原因：更新只检查实际提交素材，未修改的本地字段不应阻塞其他字段增量写入。
-        if mode == "create" and any(address.startswith("file:") for address in media):
-            result.append("含本机素材，请先接通图片上传或替换为妙手可访问的链接。")
+        # 2026-10-14：本次修改原因：本机 AI 图片在同步 ERP 时延迟上传，预检查统一交给适配器的图床配置。
+        validate_media = getattr(self.adapter, "validate_media", None)
+        if callable(validate_media):
+            # result.extend(validate_media(product))
+            # 2026-10-14：本次修改原因：更新只预检本次修改的媒体字段，避免旧本机草稿阻挡文案回传。
+            result.extend(validate_media(product, mode))
+        elif mode == "create" and any(isinstance(address, str) and address.startswith("file:") for address in media):
+            # 2026-10-14：本次修改原因：兼容尚未实现图床预检查的第三方适配器，保留原有阻止提示。
+            # result.append("含本机素材，请先配置图床或对象存储并替换为 HTTP/HTTPS 链接。")
+            # 2026-10-14：本次修改原因：第三方适配器没有托管接口时继续给出准确的阻止原因与操作步骤。
+            result.append("此回传适配器的图片自动托管尚未接入。请将本机图片换成 HTTP/HTTPS 公网链接，保存审核后回传。")
         result.extend(self.adapter.validate(product, mode))
         return list(dict.fromkeys(result))
 
