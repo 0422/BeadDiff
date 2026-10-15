@@ -205,6 +205,21 @@ QPushButton#quiet { background: transparent; color: $accent; border: 1px solid t
 QPushButton#quiet:hover { background: $hover; }
 QPushButton#danger { color: $danger; border-color: $danger; }
 QPushButton#danger:hover, QPushButton#danger:pressed { background: $danger_bg; }
+/* 2026-10-15：本次修改原因：原料图片空状态使用居中加号和虚线圆角上传框，图片操作收至预览右上角，颜色跟随主题。 */
+QPushButton#materialUpload { background: $alternate; border: 2px dashed $border; border-radius: 10px; padding: 0px; min-height: 0px; }
+QPushButton#materialUpload:hover, QPushButton#materialUpload:focus { background: $hover; border-color: $accent; }
+QPushButton#materialUpload:pressed { background: $selected; border-color: $accent; }
+QLabel#materialUploadPlus { background: transparent; color: $accent; font-size: 38px; }
+QLabel#materialUploadCaption { background: transparent; color: $muted; font-size: 13px; }
+QPushButton#materialImageAction { background: $surface; color: $text; border: 1px solid $border; border-radius: 7px; padding: 0px; min-height: 0px; min-width: 0px; font-size: 22px; }
+QPushButton#materialImageAction:hover, QPushButton#materialImageAction:focus { background: $hover; color: $accent; border-color: $accent; }
+QPushButton#materialImageAction:pressed { background: $selected; }
+QPushButton#materialImageAction[removeImage="true"]:hover, QPushButton#materialImageAction[removeImage="true"]:focus { background: $danger_bg; color: $danger; border-color: $danger; }
+/* 2026-10-15：本次修改原因：原料图片底部轮播使用紧凑箭头及清晰的缩略图选中边框，配色沿用浅深主题。 */
+QPushButton#materialPhotoNav { background: $surface; color: $text; border: 1px solid $border; border-radius: 7px; padding: 0px; min-height: 0px; min-width: 0px; font-size: 22px; }
+QPushButton#materialPhotoNav:hover, QPushButton#materialPhotoNav:focus { background: $hover; color: $accent; border-color: $accent; }
+QPushButton#materialPhotoNav:pressed { background: $selected; }
+QPushButton#materialPhotoNav:disabled { background: $surface; color: $disabled; border-color: $border; }
 QPushButton#filterTab { background: transparent; border: none; color: $muted; padding: 8px 12px; }
 QPushButton#filterTab:hover { background: $hover; }
 QPushButton#filterTab:checked { background: $selected; color: $text; font-weight: 600; }
@@ -227,12 +242,17 @@ QSpinBox QLineEdit, QDoubleSpinBox QLineEdit { border: none; border-radius: 0px;
 /* QSpinBox::up-arrow, QSpinBox::down-arrow, QDoubleSpinBox::up-arrow, QDoubleSpinBox::down-arrow { width: 10px; height: 6px; } */
 QSpinBox::up-button, QSpinBox::down-button, QDoubleSpinBox::up-button, QDoubleSpinBox::down-button { width: 0px; height: 0px; border: none; background: transparent; }
 QLineEdit:read-only { background: $alternate; color: $muted; }
-QLineEdit[cellEditor="true"] { padding: 2px 5px; min-height: 0px; border-radius: 3px; border: 1px solid $accent; }
+/* QLineEdit[cellEditor="true"] { padding: 2px 5px; min-height: 0px; border-radius: 3px; border: 1px solid $accent; } */
+/* 2026-10-15：本次修改原因：表格内多行资料输入沿用单行编辑器的主题边框和紧凑留白。 */
+QLineEdit[cellEditor="true"], QPlainTextEdit[cellEditor="true"] { padding: 2px 5px; min-height: 0px; border-radius: 3px; border: 1px solid $accent; }
 /* QComboBox::drop-down { border: none; width: 24px; } */
 /* 2026-10-13：本次修改原因：下拉输入与展开列表统一圆角、行高和留白，不沿用系统菜单的凹凸边框。 */
 QComboBox { padding: 8px 34px 8px 12px; min-height: 18px; }
 QComboBox::drop-down { border: none; width: 28px; background: transparent; }
 QComboBox::down-arrow { image: none; width: 0px; height: 0px; }
+/* 2026-10-15：本次修改原因：原料来源和状态列撤下多余右侧留白，箭头仅占右侧 22px，缩窄列宽后仍有足够文字空间。 */
+QComboBox[materialFactChoice="true"] { padding: 8px 0px 8px 6px; min-width: 0px; }
+QComboBox[materialFactChoice="true"]::drop-down { subcontrol-origin: border; subcontrol-position: center right; width: 22px; }
 /* QFrame#comboPopupFrame { background: $surface; border: 1px solid $border; border-radius: 10px; } */
 /* QListView#comboPopupList { background: transparent; border: none; padding: 2px; outline: none; } */
 /* 2026-10-13：本次修改原因：修复下拉窗口透明导致文字透出并重叠；边框由不透明列表自身绘制，不依赖透明弹出容器。 */
@@ -246,11 +266,25 @@ QWidget#comboChevron { background: transparent; border: none; }
 /* QComboBox QAbstractItemView, QListWidget { background: $surface; color: $text; selection-background-color: $selected; selection-color: $text; border: 1px solid $border; outline: none; } */
 QListWidget { background: $surface; color: $text; selection-background-color: $selected; selection-color: $text; border: 1px solid $border; outline: none; }
 QListWidget::item { padding: 8px; }
+/* 2026-10-15：本次修改原因：底部缩略图片带使用透明底色与紧凑留白，当前图片即使失焦也保留清晰高亮。 */
+QListWidget#materialPhotoThumbnails { background: transparent; border: none; padding: 0px; }
+QListWidget#materialPhotoThumbnails::item { padding: 4px; border: 2px solid transparent; border-radius: 7px; }
+QListWidget#materialPhotoThumbnails::item:hover { background: $hover; border-color: $border; }
+QListWidget#materialPhotoThumbnails::item:selected { background: $selected; color: $text; border-color: $accent; }
 QCheckBox { spacing: 8px; }
 QCheckBox::indicator { width: 16px; height: 16px; }
 QTableView, QTableWidget { background: $surface; border: 1px solid $border; border-radius: 8px; alternate-background-color: $alternate; selection-background-color: $selected; selection-color: $text; gridline-color: $border; outline: none; }
 /* 2026-10-13：本次修改原因：主工作区表格和只读回执已被圆角分区包围，取消重复的内层边框，保留表头与行分隔。 */
 QTableView[embeddedTable="true"], QTableWidget[embeddedTable="true"] { border: none; border-radius: 0px; }
+/* 2026-10-15：本次修改原因：数据库原料列表使用独立的 2px 圆角外框，避免表格内部控件遮挡边界。 */
+QFrame#databaseListFrame { background: $surface; border: 2px solid $border; border-radius: 10px; }
+/* 2026-10-15：本次修改原因：原料弹窗的图片区和资料表分别使用清晰的圆角外框，沿用浅深主题配色。 */
+QFrame#materialImageFrame, QFrame#materialFactsFrame { background: $surface; border: 2px solid $border; border-radius: 10px; }
+QFrame#materialImageFrame QLabel#imagePreview { border: none; }
+/* 2026-10-15：本次修改原因：表格边缘入口平时融入背景，悬停或键盘聚焦时显示加号和新增区域。 */
+QToolButton#tableEdgeAdd { background: transparent; color: transparent; border: 1px solid transparent; border-radius: 5px; padding: 0px; min-width: 0px; min-height: 0px; font-size: 19px; }
+QToolButton#tableEdgeAdd[edgeActive="true"], QToolButton#tableEdgeAdd:hover, QToolButton#tableEdgeAdd:focus { background: $selected; color: $accent; border: 1px dashed $accent; }
+QToolButton#tableEdgeAdd:pressed { background: $hover; color: $accent; }
 QPlainTextEdit[embeddedViewer="true"] { border: none; border-radius: 0px; padding: 6px; }
 QTableView::item, QTableWidget::item { padding: 4px 7px; border: none; border-bottom: 1px solid $border; }
 QTableView::item:hover, QTableWidget::item:hover { background: $hover; }
@@ -316,6 +350,8 @@ QToolButton:disabled { color: $disabled; }
 /* 2026-10-13：本次修改原因：区域之间常态仅显示留白，鼠标经过再高亮拖拽，减少横竖装饰线。 */
 QSplitter::handle { background: transparent; }
 QSplitter::handle:hover, QSplitter::handle:pressed { background: $accent; }
+/* 2026-10-15：本次修改原因：原料弹窗的图片与资料分隔条始终透明，拖动调宽时不再显示深绿色长条。 */
+QSplitter#materialDetailsSplitter::handle, QSplitter#materialDetailsSplitter::handle:hover, QSplitter#materialDetailsSplitter::handle:pressed { background: transparent; }
 QMenu { background: $surface; color: $text; border: 1px solid $border; padding: 5px; }
 QMenu::item { padding: 7px 14px; }
 QMenu::item:selected { background: $selected; }
@@ -485,7 +521,12 @@ class InterfaceStyle(QProxyStyle):
     def position_chevron(combo):
         chevron = getattr(combo, "_beaddiff_chevron", None)
         if chevron:
-            chevron.setGeometry(max(0, combo.width() - 30), 1, 24, max(0, combo.height() - 2))
+            # chevron.setGeometry(max(0, combo.width() - 30), 1, 24, max(0, combo.height() - 2))
+            # 2026-10-15：本次修改原因：原料选择列的矢量箭头与紧凑展开区对齐，避免箭头占据文字空间。
+            if combo.property("materialFactChoice"):
+                chevron.setGeometry(max(0, combo.width() - 23), 1, 22, max(0, combo.height() - 2))
+            else:
+                chevron.setGeometry(max(0, combo.width() - 30), 1, 24, max(0, combo.height() - 2))
             chevron.show()
             chevron.raise_()
             chevron.update()

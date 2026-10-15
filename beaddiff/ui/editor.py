@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+# 2026-10-15：本次修改原因：商品编辑页可查看冻结配方的完整资料，不从现有原料反推历史设计。
+import json
 
 # from PySide6.QtCore import Qt
 # 2026-10-11：本次修改原因：延迟更新缩略图并支持打开已采集的视频链接。
@@ -196,6 +198,16 @@ class ProductEditor(QWidget):
         self._certification_tab()
         self._logistics_tab()
         self._source_tab()
+        # 2026-10-15：本次修改原因：成链商品更换图片或规格后提供配方核对入口，审核前明确重新确认。
+        self.design_review = None
+        if product.source_route == "bead_chain":
+            design_row = QHBoxLayout()
+            design_row.addWidget(button("查看锁定配方", self.show_design_recipe))
+            self.design_review = QCheckBox("已对照锁定配方核对当前图片、SKU 与文案")
+            self.design_review.setChecked(bool(product.bom_snapshot.get("images_confirmed")))
+            self.design_review.setToolTip("修改图片、规格或文案后会取消确认；售价和库存单独修改时保留确认。配方改款请回到散珠成链复制设计。")
+            design_row.addWidget(self.design_review, 1)
+            root.addLayout(design_row)
         # 2026-10-12：本次修改原因：加工阶段提前说明本机图片上传边界及 AI 应用后仍需保存。
         self.edit_feedback = label("AI 结果应用后需保存商品；本机白底图及生成图回传前需转换为公网链接。", "hint", True)
         # 2026-10-14：本次修改原因：本机素材状态单独显示，不被未保存或 AI 应用成功提示覆盖。
@@ -239,6 +251,9 @@ class ProductEditor(QWidget):
         self.attribute_table.itemChanged.connect(self.mark_dirty)
         self.images.textChanged.connect(self.mark_dirty)
         self.detail_images.textChanged.connect(self.mark_dirty)
+        # 2026-10-15：本次修改原因：人工勾选确认独立于内容变动，保存时交由存储层核验来源快照。
+        if self.design_review is not None:
+            self.design_review.toggled.connect(self.mark_dirty)
         self.tabs.currentChanged.connect(lambda _index: self.refresh_sku_images())
         # 2026-10-13：本次修改原因：预览不触发字段修改；标签页与快捷键仅复用现有编辑入口。
         # 2026-10-13：本次修改原因：预览复用现有异步图片接口，不生成或存储新商品字段。
@@ -258,6 +273,8 @@ class ProductEditor(QWidget):
             # 2026-10-12：本次修改原因：保留首屏规范化表单快照，后续只应用用户实际改变的单字段。
             self.initial_form_product = self.collect()
             self.initial_form_content = self.initial_form_product.business_content()
+            # 2026-10-15：本次修改原因：记录表单规范化后的核对内容，未编辑字段不误取消原有人工确认。
+            self._last_design_review_content = self.initial_form_product.design_review_content()
         except ValueError:
             self.initial_form_content = None
 
@@ -293,6 +310,15 @@ class ProductEditor(QWidget):
 
     def mark_dirty(self, *_args) -> None:
         self.dirty = True
+        # 2026-10-15：本次修改原因：手动编辑和 AI 应用均不能沿用与旧图片、旧规格对应的确认状态。
+        if getattr(self, "design_review", None) is not None and hasattr(self, "_last_design_review_content"):
+            try:
+                current = self.collect().design_review_content()
+            except (ValueError, AttributeError):
+                current = None
+            if current != self._last_design_review_content:
+                self._last_design_review_content = current
+                self.design_review.setChecked(False)
         # 2026-10-12：本次修改原因：手动和 AI 操作均明确显示未保存状态。
         if hasattr(self, "edit_feedback"):
             # self.edit_feedback.setText("有未保存修改。保存修改形成新版本；保存并审核后才可检查回传条件。")
@@ -1104,7 +1130,35 @@ class ProductEditor(QWidget):
         # 2026-10-12：本次修改原因：保存任一字段时，未编辑的富文本、空值和规格元数据保持打开编辑器前的原值。
         if hasattr(self, "initial_form_product"):
             product = preserve_unedited_form(self.product, self.initial_form_product, product)
+        # 2026-10-15：本次修改原因：完整性检查展示当前人工核对状态，最终保存仍通过专用参数确认。
+        if self.design_review is not None:
+            product.bom_snapshot["images_confirmed"] = self.design_review.isChecked()
         return product
+
+    # 2026-10-15：本次修改原因：在商品加工阶段查看完整锁定排列、BOM 和当时原料资料，避免编辑时失去来源依据。
+    def show_design_recipe(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("锁定配方与原料快照")
+        dialog.resize(880, 660)
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(label(f"来源设计：{self.product.source_ref_id} · 配方版本：{self.product.design_version_id}", "hint", True))
+        snapshot = self.product.bom_snapshot
+        materials = snapshot.get("materials", {})
+        candidate = snapshot.get("candidate", {})
+        lines = ["方案：" + candidate.get("name", "未命名"), "", "串珠排列（从线头开始）："]
+        for index, row in enumerate(candidate.get("sequence", []), 1):
+            item = materials.get(row["material_id"], {})
+            lines.append(f"{index}. {item.get('code', row['material_id'])} · {item.get('name', '')} × {row['quantity']}")
+        lines.extend(["", "配件用量："])
+        for row in candidate.get("components", []):
+            item = materials.get(row["material_id"], {})
+            lines.append(f"{item.get('code', row['material_id'])} · {item.get('name', '')} × {row['quantity']}")
+        lines.extend(["", "完整锁定资料：", json.dumps(snapshot, ensure_ascii=False, indent=2)])
+        viewer = QPlainTextEdit("\n".join(lines))
+        viewer.setReadOnly(True)
+        layout.addWidget(viewer, 1)
+        layout.addWidget(button("关闭", dialog.accept))
+        dialog.exec()
 
     def check(self) -> None:
         try:
@@ -1490,7 +1544,10 @@ class ProductEditor(QWidget):
                 sizes = product.image_sizes
                 product = Product.from_dict(self.product.to_dict())
                 product.image_sizes = sizes
-            self.repository.save_product(product, approve=approve)
+            # self.repository.save_product(product, approve=approve)
+            # 2026-10-15：本次修改原因：普通商品保持原保存方式，成链商品明确提交本次配方及图片核对结果。
+            self.repository.save_product(product, approve=approve,
+                                         confirm_design_images=self.design_review.isChecked() if self.design_review is not None else None)
         except Exception as error:
             # QMessageBox.warning(self, "未能保存", str(error))
             # 2026-10-14：本次修改原因：保存失败提供具体栏目和字段。

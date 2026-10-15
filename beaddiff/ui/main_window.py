@@ -42,6 +42,8 @@ from ..config import Settings
 # 2026-10-12：本次修改原因：结果标签由回传记录页使用，主窗口只负责调度。
 from ..erp import ERPService, MODE_LABELS
 from ..models import Product, valid_url
+# 2026-10-15：本次修改原因：接入原料库与独立设计工作区。
+from ..beads import BeadStore
 from ..receiver import LocalReceiver
 from ..service import CaptureService
 from ..storage import Repository
@@ -73,6 +75,11 @@ from .model_settings import ModelSettingsPage
 # from .product_creation import ProductCreation
 # 2026-10-14：本次修改原因：接入白底图配置与错误处理位置。
 from .product_creation import ProductCreation
+# 2026-10-15：本次修改原因：新的白底图流程由散珠资料库和成链设计页面承担。
+from .bead_database import BeadDatabasePage
+from .bead_chain import BeadChainPage
+# 2026-10-15：本次修改原因：ERP 承接原完整列表，采集箱加工单独负责同步及编辑。
+from .erp_return import ErpReturnPage, CaptureProcessingPage
 from ..listing import ListingDefaultsStore
 from .listing_settings import ListingSettingsPage
 from ..validation_guidance import explain_errors, explain_issue
@@ -134,11 +141,20 @@ class MainWindow(DesktopWindow):
     # 2026-10-14：本次修改原因：追加白底图设置编号，不改变既有帮助、图床和系统跳转。
     SETTINGS_HELP = 5
     SETTINGS_LISTING = 7
+    # 2026-10-15：本次修改原因：将 ERP 汇总、散珠数据库和散珠成链设为独立一级工作区。
+    # PAGE_ERP_RETURN = 7
+    # 2026-10-15：本次修改原因：原列表索引保留为统一 ERP 页，新增采集箱加工入口。
+    PAGE_ERP_RETURN = PAGE_PRODUCTS
+    PAGE_CAPTURE = 7
+    PAGE_BEAD_DATABASE = 8
+    PAGE_BEAD_CHAIN = 9
     # 2026-10-12：本次修改原因：后台阶段提示只在主线程更新界面。
     transfer_progress = Signal(str)
     def __init__(self, settings: Settings, repository: Repository, service: CaptureService, receiver: LocalReceiver):
         super().__init__()
         self.settings, self.repository, self.service, self.receiver = settings, repository, service, receiver
+        # 2026-10-15：本次修改原因：原料和设计项目使用独立存储，不混入最终 ERP 商品表。
+        self.bead_store = BeadStore(settings.data_dir)
         self.network = QNetworkAccessManager(self)
         self.pool = QThreadPool(self)
         self.pool.setMaxThreadCount(2)
@@ -170,13 +186,17 @@ class MainWindow(DesktopWindow):
         self.checked_ids: set[str] = set()
         self.active_filter = "全部"
         # 2026-10-13：本次修改原因：列表按采集商品/白底图商品切换展示，仅是界面筛选，不改变获取路线或存储。
-        self.product_source = "capture"
+        # self.product_source = "capture"
+        # 2026-10-15：本次修改原因：ERP 默认汇总采集箱、设计生成和过渡白底图全部商品。
+        self.product_source = "all"
         self.current_product: Product | None = None
         # 2026-10-13：本次修改原因：商品编辑共用主窗口页面栈，保留列表实例及进入前的显示状态。
         self.product_editor: ProductEditor | None = None
         # self.setWindowTitle("BeadDiff · 商品工作台")
         # 2026-10-12：本次修改原因：统一商品加工入口、来源和反馈链路。
-        self.setWindowTitle("BeadDiff · 商品加工")
+        # self.setWindowTitle("BeadDiff · 商品加工")
+        # 2026-10-15：本次修改原因：顶层工作区已包含独立设计和 ERP 模块。
+        self.setWindowTitle("BeadDiff · 商品工作台")
         self.resize(1500, 930)
         self.setMinimumSize(1180, 760)
         self.setWindowIcon(icon("products", "#138b78"))
@@ -220,7 +240,10 @@ class MainWindow(DesktopWindow):
         column_layout.addWidget(workspace, 1)
         self.root_splitter.addWidget(workspace_column)
         self.stack = QStackedWidget()
-        self.stack.addWidget(self._products_page())
+        # self.stack.addWidget(self._products_page())
+        # 2026-10-15：本次修改原因：抽离原商品列表作为统一回传 ERP 模块，原有完整能力直接复用。
+        self.erp_return_page = ErpReturnPage(self)
+        self.stack.addWidget(self.erp_return_page)
         # self.stack.addWidget(self._captures_page())
         # 2026-10-12：本次修改原因：表格路线撤下后，第三项导航改为 ERP 回传记录。
         # self.stack.addWidget(self._erp_records_page())
@@ -239,6 +262,15 @@ class MainWindow(DesktopWindow):
         # 2026-10-14：本次修改原因：独立展示已托管图片及公网链接，候选图仍留在商品编辑草稿中。
         self.image_hosting_page = ImageHostingPage(self.image_hosting_store, self.image_hosting_service, self.ai_hub, self)
         self.stack.addWidget(self.image_hosting_page)
+        # 2026-10-15：本次修改原因：提供统一 ERP 回传中心及两条独立类目工作流入口。
+        self.capture_processing_page = CaptureProcessingPage(self)
+        self.bead_database_page = BeadDatabasePage(self.bead_store, self.assets, self, ai_service=self.ai_service, ai_hub=self.ai_hub)
+        self.bead_chain_page = BeadChainPage(self.bead_store, self.ai_service, self.ai_hub, self, repository=self.repository,
+                                          open_product=lambda product_id:self.focus_product(product_id,edit=True),
+                                          open_erp=lambda product_id:self.focus_product(product_id))
+        self.stack.addWidget(self.capture_processing_page)
+        self.stack.addWidget(self.bead_database_page)
+        self.stack.addWidget(self.bead_chain_page)
         self.workspace_layout.addWidget(self.stack, 1)
         # self.statusBar().showMessage("就绪 · 原始材料与编辑版本保存在本机")
         # 2026-10-13：本次修改原因：无边框窗口用边缘拖拽缩放，撤下右下角单独尺寸柄。
@@ -351,7 +383,16 @@ class MainWindow(DesktopWindow):
         # ]):
         # 2026-10-13：本次修改原因：爆款参考与商品加工相邻，日志及配置保持集中，使用稳定页面编号。
         for index, text, symbol in [
-            (self.PAGE_PRODUCTS, "商品加工", "products"),
+            # (self.PAGE_PRODUCTS, "商品加工", "products"),
+            # 2026-10-15：本次修改原因：采集箱加工只承载妙手采集路线，ERP 汇总与散珠设计移至独立模块。
+            # (self.PAGE_PRODUCTS, "采集箱加工", "capture"),
+            # 2026-10-15：本次修改原因：加工入口与统一 ERP 列表在导航中独立。
+            (self.PAGE_CAPTURE, "采集箱加工", "capture"),
+            (self.PAGE_ERP_RETURN, "回传 ERP", "export"),
+            # (self.PAGE_BEAD_DATABASE, "散珠数据库", "products"),
+            # 2026-10-15：本次修改原因：原料模块已支持多个类目库，导航统一改名数据库。
+            (self.PAGE_BEAD_DATABASE, "数据库", "products"),
+            (self.PAGE_BEAD_CHAIN, "散珠成链", "analysis"),
             (self.PAGE_REFERENCES, "爆款分析", "analysis"),
             (self.PAGE_TRACKING, "包裹追踪", "tracking"),
             (self.PAGE_HOSTING, "图床", "hosting"),
@@ -405,17 +446,26 @@ class MainWindow(DesktopWindow):
             for item in self.navigation.buttons():
                 item.setIcon(icon(item.property("navSymbol"), theme_tokens()["muted"]))
 
-    def navigate(self, index: int) -> None:
+    # def navigate(self, index: int) -> None:
+    # 2026-10-15：本次修改原因：调用者必须知道草稿保护是否取消导航，防止取消后继续打开别的商品。
+    def navigate(self, index: int) -> bool:
+        # 2026-10-15：本次修改原因：离开成链工作区前保护设计草稿和模型任务。
+        if self.stack.currentIndex() == self.PAGE_BEAD_CHAIN and index != self.PAGE_BEAD_CHAIN:
+            if not self.bead_chain_page.can_leave():
+                self.navigation.button(self.PAGE_BEAD_CHAIN).setChecked(True)
+                return False
         # 2026-10-13：本次修改原因：方案未保存或分析中切页也有保护，不丢弃用户输入。
         if self.stack.currentIndex() == self.PAGE_REFERENCES and index != self.PAGE_REFERENCES:
             if not self.reference_analysis_page.can_leave():
                 self.navigation.button(self.PAGE_REFERENCES).setChecked(True)
-                return
+                return False
         # 2026-10-13：本次修改原因：切换导航同样检查未保存内容和 AI 任务，避免页面式编辑绕过原关闭保护。
         editor = getattr(self, "product_editor", None)
         if editor is not None and not editor.reject():
-            self.navigation.button(self.PAGE_PRODUCTS).setChecked(True)
-            return
+            # self.navigation.button(self.PAGE_PRODUCTS).setChecked(True)
+            # 2026-10-15：本次修改原因：编辑未保存时保持所属加工模块导航。
+            self.navigation.button(getattr(editor,"origin_page",self.PAGE_PRODUCTS)).setChecked(True)
+            return False
         self.stack.setCurrentIndex(index)
         self.navigation.button(index).setChecked(True)
         # if index == 3:
@@ -433,6 +483,13 @@ class MainWindow(DesktopWindow):
         # 2026-10-14：本次修改原因：每次进入图床页展示最新同步结果与手动上传记录。
         if index == self.PAGE_HOSTING:
             self.image_hosting_page.refresh()
+        if index == self.PAGE_CAPTURE:
+            self.capture_processing_page.refresh()
+        if index == self.PAGE_BEAD_DATABASE:
+            self.bead_database_page.refresh()
+        if index == self.PAGE_BEAD_CHAIN:
+            self.bead_chain_page.refresh()
+        return True
 
     def _heading(self, title: str, subtitle: str) -> tuple[QHBoxLayout, QVBoxLayout]:
         row = QHBoxLayout()
@@ -570,9 +627,15 @@ class MainWindow(DesktopWindow):
         # more.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         # heading.addWidget(more)
         # 2026-10-13：本次修改原因：撤下顶部更多及重复刷新；设置/帮助仍从侧栏设置进入，导入文件迁至采集切换区。
-        self.product_upload_button = button("上传白底图", self.create_from_photos, primary=True, symbol="import")
+        # self.product_upload_button = button("上传白底图", self.create_from_photos, primary=True, symbol="import")
+        # 2026-10-15：本次修改原因：过渡入口明确标识旧实现，新的原料白底图从散珠数据库录入。
+        self.product_upload_button = button("旧白底图入口", self.create_from_photos, primary=True, symbol="import")
         self.product_upload_button.setProperty("compact", True)
-        self.product_upload_button.setToolTip("选择白底图创建商品，继续编辑或 AI 加工。")
+        # self.product_upload_button.setToolTip("选择白底图创建商品，继续编辑或 AI 加工。")
+        # 2026-10-15：本次修改原因：旧白底图入口只作过渡，新的原料设计使用独立模块。
+        # self.product_upload_button.setToolTip("旧白底图入口，过渡保留；新散珠设计请使用散珠数据库 → 散珠成链。")
+        # 2026-10-15：本次修改原因：提示随原料模块改名统一使用数据库。
+        self.product_upload_button.setToolTip("旧白底图入口，过渡保留；新散珠设计请使用数据库 → 散珠成链。")
         # splitter = QSplitter(Qt.Orientation.Horizontal)
         # splitter.setChildrenCollapsible(False)
         # 2026-10-13：本次修改原因：去掉右侧商品速览，将全部可用宽度交给商品列表。
@@ -620,11 +683,16 @@ class MainWindow(DesktopWindow):
         switch_layout.setContentsMargins(3, 3, 3, 3)
         switch_layout.setSpacing(2)
         self.product_sources = QButtonGroup(self)
-        for index, text in enumerate(("采集商品", "白底图商品")):
+        # 2026-10-15：本次修改原因：旧白底图路线仅作为过渡保留，新的真实白底图流程由散珠数据库和散珠成链承担。
+        # for index, text in enumerate(("采集商品", "旧白底图（过渡）")):
+        # for index, text in enumerate(("采集商品", "白底图商品")):
+        # 2026-10-15：本次修改原因：统一商品列表支持全部来源及新类目设计筛选，旧白底图入口过渡保留。
+        for index, text in ((2,"全部商品"),(0,"采集箱商品"),(3,"散珠成链"),(1,"旧白底图（过渡）")):
             tab = button(text)
             tab.setObjectName("sourceTab")
             tab.setCheckable(True)
-            tab.setChecked(index == 0)
+            # tab.setChecked(index == 0)
+            tab.setChecked(index == 2)
             self.product_sources.addButton(tab, index)
             switch_layout.addWidget(tab)
         self.product_sources.idClicked.connect(self.change_product_source)
@@ -667,6 +735,8 @@ class MainWindow(DesktopWindow):
         self.acquisition_filter.addItem("全部获取方式", "")
         for route, caption in ROUTE_LABELS.items():
             self.acquisition_filter.addItem(caption, route)
+        # 2026-10-15：本次修改原因：仅扩展 ERP 来源筛选，不把成链设计加入采集路线配置。
+        self.acquisition_filter.addItem("散珠成链", "bead_chain")
         # self.acquisition_filter.currentIndexChanged.connect(self.populate_products)
         # 2026-10-13：本次修改原因：原获取方式筛选与新的来源标签联动，防止两个筛选互相冲突。
         self.acquisition_filter.currentIndexChanged.connect(self.acquisition_filter_changed)
@@ -784,7 +854,9 @@ class MainWindow(DesktopWindow):
         # 2026-10-11：本次修改原因：为空商品库提供采集与上传两条可操作路线。
         # self.product_empty = label("还没有商品\n导入采集文件、配置插件同步，或上传白底图创建商品。", "empty", True)
         # 2026-10-12：本次修改原因：统一商品加工入口、来源和反馈链路。
-        self.product_empty = label("还没有商品\n点击“同步妙手采集箱”或“上传白底图建商品”开始。", "empty", True)
+        # self.product_empty = label("还没有商品\n点击“同步妙手采集箱”或“上传白底图建商品”开始。", "empty", True)
+        # 2026-10-15：本次修改原因：空态指向实际可操作的来源模块。
+        self.product_empty = label("还没有商品\n在采集箱加工同步商品，或在散珠成链完成设计后汇总。", "empty", True)
         self.product_empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
         catalog_layout.addWidget(self.product_empty)
         # self.product_summary = label("共 0 个商品", "muted")
@@ -1105,6 +1177,8 @@ class MainWindow(DesktopWindow):
         self.settings_tabs.addTab(self._system_settings_page(), "系统")
         self.listing_settings = ListingSettingsPage(self.listing_defaults_store, self)
         self.settings_tabs.addTab(self.listing_settings, "白底图 Listing")
+        # 2026-10-15：本次修改原因：保留旧配置并说明其使用范围，避免误用于新设计工作流。
+        self.settings_tabs.setTabToolTip(self.SETTINGS_LISTING, "仅供旧白底图过渡入口使用；散珠成链在模块内设置条件，使用当前 AI 模型。")
         # layout.addWidget(self.settings_tabs, 1)
         # 2026-10-13：本次修改原因：设置分组固定在左侧，内容分栏可拖动，原四个标签与跳转索引保持一致。
         from PySide6.QtWidgets import QListWidget
@@ -1179,7 +1253,11 @@ class MainWindow(DesktopWindow):
         contents.addWidget(self.capture_route)
         contents.addWidget(label("妙手接口：原插件先采集到妙手，再点击“同步妙手采集箱”查询、勾选并导入 ERP 已解析的商品。\n"
                                  "插件同步：加载随附扩展，另发一份原始材料到本机解析；选择此路线才启用接收服务。\n"
-                                 "上传白底图始终可用。切换获取路线保留全部历史商品、编辑内容及记录。", "hint", True))
+                                 # "上传白底图始终可用。切换获取路线保留全部历史商品、编辑内容及记录。", "hint", True))
+                                 # 2026-10-15：本次修改原因：原料设计独立于采集箱路线，旧入口仅过渡保留。
+                                 # "散珠数据库与散珠成链独立于采集路线；旧白底图入口过渡保留。切换路线保留历史商品及记录。", "hint", True))
+                                 # 2026-10-15：本次修改原因：设置页说明随原料模块改名。
+                                 "数据库与散珠成链独立于采集路线；旧白底图入口过渡保留。切换路线保留历史商品及记录。", "hint", True))
         self.capture_route_save = button("保存采集路线", self.save_capture_route, primary=True)
         contents.addWidget(self.capture_route_save)
         actions = QHBoxLayout()
@@ -1271,7 +1349,9 @@ class MainWindow(DesktopWindow):
         self.erp_mode.addItem("更新妙手公共采集箱中的原商品", "update")
         self.erp_mode.setCurrentIndex(self.erp_mode.findData(self.settings.erp_transfer_mode))
         contents.addWidget(self.erp_mode)
-        contents.addWidget(label("更新原商品需要可靠关联妙手商品 ID。来源平台商品 ID 不能直接代替；上传白底图创建的商品首次回传请选择新增。", "hint", True))
+        # contents.addWidget(label("更新原商品需要可靠关联妙手商品 ID。来源平台商品 ID 不能直接代替；上传白底图创建的商品首次回传请选择新增。", "hint", True))
+        # 2026-10-15：本次修改原因：成链来源也需明确首次回传方式。
+        contents.addWidget(label("更新原商品需要可靠关联妙手商品 ID。来源平台商品 ID 不能代替；散珠成链及旧白底图商品首次回传请选择新增。", "hint", True))
         actions = QHBoxLayout()
         actions.addStretch()
         actions.addWidget(button("保存回传方式", self.save_erp_mode, primary=True))
@@ -1404,6 +1484,12 @@ class MainWindow(DesktopWindow):
         # 2026-10-12：本次修改原因：刷新两类采集记录及回传页面。
         self.capture_records_page.refresh()
         self.erp_records_page.refresh()
+        # 2026-10-15：本次修改原因：主数据刷新后同步刷新独立 ERP 汇总页和散珠工作区。
+        # self.erp_return_page.refresh()
+        # self.bead_database_page.refresh()
+        # self.bead_chain_page.refresh()
+        # 2026-10-15：本次修改原因：后台接收刷新只更新商品，避免重置独立设计工作区的编辑与勾选。
+        self.capture_processing_page.refresh()
         # 2026-10-13：本次修改原因：移除、恢复或永久删除后更新回收站数量及入口。
         self.recycle_bin_page.refresh()
         self.restore_products_button.setText(f"回收站（{len(self.repository.hidden_local_ids('products'))}）")
@@ -1411,14 +1497,21 @@ class MainWindow(DesktopWindow):
 
     # 2026-10-13：本次修改原因：来源标签只筛选本机列表，按钮继续调用原同步/建档功能，不自动发起请求。
     def update_product_intake(self) -> None:
-        capture = self.product_source == "capture"
-        plugin = self.settings.capture_route == "plugin"
-        self.erp_import_button.setVisible(capture and not plugin)
-        self.import_button.setVisible(capture and plugin)
-        self.product_upload_button.setVisible(not capture)
+        # capture = self.product_source == "capture"
+        # plugin = self.settings.capture_route == "plugin"
+        # 2026-10-15：本次修改原因：同步按钮迁至采集箱加工，ERP 列表只保留旧白底图过渡入口。
+        # self.erp_import_button.setVisible(capture and not plugin)
+        # self.import_button.setVisible(capture and plugin)
+        # self.product_upload_button.setVisible(not capture)
+        # 2026-10-15：本次修改原因：同步操作归入采集箱加工；旧白底图只在过渡标签中提供入口。
+        self.erp_import_button.setVisible(False)
+        self.import_button.setVisible(False)
+        self.product_upload_button.setVisible(self.product_source == "upload")
 
     def change_product_source(self, index: int, *, reset_filters: bool = True, render: bool = True) -> None:
-        self.product_source = "upload" if index == 1 else "capture"
+        # self.product_source = "upload" if index == 1 else "capture"
+        # 2026-10-15：本次修改原因：来源筛选支持统一汇总与成链商品。
+        self.product_source = {0:"capture",1:"upload",2:"all",3:"bead_chain"}.get(index,"all")
         self.product_sources.button(index).setChecked(True)
         if reset_filters:
             for widget in (self.acquisition_filter, self.source_filter):
@@ -1432,7 +1525,8 @@ class MainWindow(DesktopWindow):
     def acquisition_filter_changed(self, *_args) -> None:
         route = self.acquisition_filter.currentData()
         if route:
-            self.change_product_source(1 if route == "upload" else 0, reset_filters=False, render=False)
+            # self.change_product_source(1 if route == "upload" else 0, reset_filters=False, render=False)
+            self.change_product_source(1 if route == "upload" else (3 if route == "bead_chain" else 0), reset_filters=False, render=False)
             if route == "upload":
                 self.source_filter.blockSignals(True)
                 self.source_filter.setCurrentIndex(0)
@@ -1442,6 +1536,12 @@ class MainWindow(DesktopWindow):
     def filter_changed(self, index: int) -> None:
         self.active_filter = ["全部", "待完善", "待审核", "已审核"][index]
         self.populate_products()
+
+    # 2026-10-15：本次修改原因：ERP 汇总筛选使用真实来源标记，设计商品不再混入旧上传路线。
+    def matches_product_source(self, product: Product) -> bool:
+        return (self.product_source == "all"
+                or (self.product_source == "capture" and product.acquisition_route in {"miaoshou","plugin"})
+                or self.product_source == product.acquisition_route)
 
     # 2026-10-13：本次修改原因：旧列表填充代码注释保留，改用统一字段列表。
     # def populate_products(self, *_args) -> None:
@@ -1639,7 +1739,9 @@ class MainWindow(DesktopWindow):
         filtered = [product for product in self._products
                     if (self.active_filter == "全部" or product.status == self.active_filter)
                     # 2026-10-13：本次修改原因：采集标签含接口/插件商品，白底图标签只展示自上传；业务状态规则不变。
-                    and ((product.acquisition_route == "upload") == (self.product_source == "upload"))
+                    # and ((product.acquisition_route == "upload") == (self.product_source == "upload"))
+                    # 2026-10-15：本次修改原因：所有最终商品共用审核、回传、回执及来源筛选。
+                    and self.matches_product_source(product)
                     and (source == "全部平台" or product.source == source)
                     and (not route or product.acquisition_route == route)
                     and (not query or query in " ".join([product.title, product.main_code, product.source_id,
@@ -1658,7 +1760,8 @@ class MainWindow(DesktopWindow):
             values = {
                 "image": "",
                 "product": f"{product.title or '未识别标题 · 请完善'}\n{product.main_code or '主编号未填写'}",
-                "platform": f"{product.source.upper() if product.source != 'upload' else '—'}\n{product.site or '—'}",
+                # "platform": f"{product.source.upper() if product.source != 'upload' else '—'}\n{product.site or '—'}",
+                "platform": f"{product.source.upper() if product.source not in {'upload','design'} else '—'}\n{product.site or '—'}",
                 "route": product.acquisition_label,
                 "sku": f"{len(product.skus)} 个 SKU\n{len(product.attributes)} 项属性",
                 "price": price,
@@ -1702,12 +1805,14 @@ class MainWindow(DesktopWindow):
         # self.product_empty.setText("没有符合筛选条件的商品，请调整获取方式、平台或审核筛选。" if self._products else
         #                            "还没有商品\n点击上方同步采集箱或上传白底图开始。")
         # 2026-10-13：本次修改原因：空状态和数量按当前来源显示，避免白底图列表为空却提示同步妙手。
-        source_count = sum((product.acquisition_route == "upload") == (self.product_source == "upload")
-                           for product in self._products)
-        start_action = "上传白底图" if self.product_source == "upload" else (
-            "导入采集文件" if self.settings.capture_route == "plugin" else "同步妙手采集箱")
-        self.product_empty.setText("没有符合筛选条件的商品。调整筛选或清空搜索。" if source_count else
-                                   f"暂无{'白底图' if self.product_source == 'upload' else '采集'}商品\n点击左上方“{start_action}”开始。")
+        # source_count = sum((product.acquisition_route == "upload") == (self.product_source == "upload") for product in self._products)
+        source_count = sum(self.matches_product_source(product) for product in self._products)
+        # start_action = "上传白底图" if self.product_source == "upload" else (
+        #     "导入采集文件" if self.settings.capture_route == "plugin" else "同步妙手采集箱")
+        # 2026-10-15：本次修改原因：空态统一指向对应来源模块，撤下旧入口名称计算。
+        # self.product_empty.setText("没有符合筛选条件的商品。调整筛选或清空搜索。" if source_count else f"暂无商品，点击{start_action}开始。")
+        # 2026-10-15：本次修改原因：ERP 空状态引导至独立加工模块。
+        self.product_empty.setText("没有符合筛选条件的商品。调整筛选或清空搜索。" if source_count else "暂无商品。请在“采集箱加工”同步商品，或在“散珠成链”完成设计并汇总。")
         # self.product_summary.setText(f"当前 {len(filtered)} 个 / 共 {len(self._products)} 个商品"
         #     "    ·    双击或点击行内编辑 / AI    ·    显示列可展开素材、编号、版本和检查提示")
         # 2026-10-13：本次修改原因：数量迁至列表标题旁，撤下重复的常驻操作说明。
@@ -1932,8 +2037,20 @@ class MainWindow(DesktopWindow):
         if getattr(self, "product_editor", None) is not None:
             self.stack.setCurrentWidget(self.product_editor)
             return
+        # 2026-10-15：本次修改原因：ERP 中编辑成链商品前载入对应来源项目，返回时不会误入另一个设计。
+        origin = self.PAGE_CAPTURE if product.acquisition_route in {"miaoshou","plugin"} else self.PAGE_ERP_RETURN
+        if product.source_route == "bead_chain" and self.bead_store.design(product.source_ref_id):
+            if not self.bead_chain_page.open_project(product.source_ref_id): return
+            origin = self.PAGE_BEAD_CHAIN
+        if origin == self.PAGE_CAPTURE:
+            self.capture_processing_page.refresh()
+            self.capture_processing_page.select_product(product.id)
         table = self.product_table
         context = {
+            # 2026-10-15：本次修改原因：编辑器归属来源加工模块，保存或取消后返回该模块。
+            # "origin": self.PAGE_BEAD_CHAIN if product.source_route == "bead_chain" else (
+            #     self.PAGE_CAPTURE if product.acquisition_route in {"miaoshou","plugin"} else self.PAGE_ERP_RETURN),
+            "origin": origin,
             "current_id": self.current_product.id if self.current_product else product.id,
             "column": max(0, table.currentIndex().column()),
             "selected_ids": {index.data(Qt.ItemDataRole.UserRole)
@@ -1948,10 +2065,17 @@ class MainWindow(DesktopWindow):
         editor = ProductEditor(self.repository, product, self.network, self,
                                ai_service=self.ai_service, ai_hub=self.ai_hub, reference_store=self.reference_store)
         self.product_editor = editor
+        # 2026-10-15：本次修改原因：采集、成链 Listing 编辑各自保留模块导航和返回位置。
+        editor.origin_page = context["origin"]
+        # 2026-10-15：本次修改原因：返回图标明确指向所属模块，与实际退出编辑后的落点一致。
+        return_label = {self.PAGE_CAPTURE:"返回采集箱加工",self.PAGE_BEAD_CHAIN:"返回散珠成链"}.get(origin,"返回回传 ERP")
+        editor.back_button.setToolTip(return_label)
+        editor.back_button.setAccessibleName(return_label)
         editor.closed.connect(lambda result: self.finish_product_edit(editor, result, context))
         self.stack.addWidget(editor)
         self.stack.setCurrentWidget(editor)
-        self.navigation.button(self.PAGE_PRODUCTS).setChecked(True)
+        # self.navigation.button(self.PAGE_PRODUCTS).setChecked(True)
+        self.navigation.button(context["origin"]).setChecked(True)
         editor.back_button.setFocus()
 
     # 2026-10-13：本次修改原因：保存沿用原刷新/审核反馈；返回复用列表控件，恢复勾选及滚动位置。
@@ -1959,8 +2083,11 @@ class MainWindow(DesktopWindow):
         if editor is not getattr(self, "product_editor", None):
             return
         self.product_editor = None
-        self.stack.setCurrentIndex(self.PAGE_PRODUCTS)
-        self.navigation.button(self.PAGE_PRODUCTS).setChecked(True)
+        # self.stack.setCurrentIndex(self.PAGE_PRODUCTS)
+        # self.navigation.button(self.PAGE_PRODUCTS).setChecked(True)
+        # 2026-10-15：本次修改原因：退出编辑回到所属加工模块，不强制跳回 ERP 列表。
+        self.stack.setCurrentIndex(context["origin"])
+        self.navigation.button(context["origin"]).setChecked(True)
         self.stack.removeWidget(editor)
         editor.hide()
         editor.deleteLater()
@@ -1975,6 +2102,9 @@ class MainWindow(DesktopWindow):
         else:
             # 接收服务可能在编辑期间更新了隐藏列表；按原勾选集合重新绘制，不改动商品数据。
             self.populate_products()
+        if context["origin"] == self.PAGE_CAPTURE:
+            self.capture_processing_page.refresh()
+            self.capture_processing_page.select_product(editor.product.id)
         self.restore_product_list_context(context)
         # 页面切回后的布局可能重算滚动范围，下一轮事件再次恢复最终位置。
         QTimer.singleShot(0, lambda: self.restore_product_list_context(context)
@@ -2082,7 +2212,9 @@ class MainWindow(DesktopWindow):
         # self.operation_feedback.setText("自上传商品已建档，可继续 AI 加工。白底图及生成图回传前需转换为公网链接。")
         # 2026-10-14：本次修改原因：已采用的本机图片在同步 ERP 时自动托管，提示与实际操作保持一致。
         self.operation_feedback.setText("自上传商品已建档，可继续 AI 加工。保存并审核后，同步 ERP 时会自动托管已采用的本机图片。")
-        self.statusBar().showMessage("上传商品草稿已保存在商品加工", 6000)
+        # self.statusBar().showMessage("上传商品草稿已保存在商品加工", 6000)
+        # 2026-10-15：本次修改原因：旧入口的草稿同样归入统一回传列表。
+        self.statusBar().showMessage("旧白底图商品草稿已保存在回传 ERP", 6000)
 
     def open_source(self) -> None:
         if self.current_product and valid_url(self.current_product.source_url):
@@ -2243,7 +2375,9 @@ class MainWindow(DesktopWindow):
                 text += "\n\n" + "\n".join(result["errors"][:12])
             # text += "\n\n缺失字段和解析原因可在商品库 / 采集记录中查看。"
             # 2026-10-12：本次修改原因：文件接收结果指向新的加工入口。
-            text += "\n\n缺失字段和解析原因可在商品加工 / 采集记录中查看。"
+            # text += "\n\n缺失字段和解析原因可在商品加工 / 采集记录中查看。"
+            # 2026-10-15：本次修改原因：同步结果指向拆分后的编辑与日志入口。
+            text += "\n\n缺失字段可在采集箱加工查看，解析原因见日志记录 → 采集记录。"
             QMessageBox.information(self, "导入结果", text)
             self.statusBar().showMessage("文件导入结束", 6000)
 
@@ -2385,7 +2519,9 @@ class MainWindow(DesktopWindow):
             # 2026-10-14：本次修改原因：首屏显示具体补充位置，完整问题保留在详情。
             notice.setInformativeText("\n".join(details.splitlines()[:16]) + "\n完整问题和处理位置可展开详情查看。")
             notice.setDetailedText(details)
-            process = notice.addButton("进入商品加工", QMessageBox.ButtonRole.ActionRole)
+            # process = notice.addButton("进入商品加工", QMessageBox.ButtonRole.ActionRole)
+            # 2026-10-15：本次修改原因：按商品来源进入对应模块的编辑页面。
+            process = notice.addButton("编辑待处理商品", QMessageBox.ButtonRole.ActionRole)
             records = notice.addButton("查看回传记录", QMessageBox.ButtonRole.ActionRole)
             notice.addButton("返回", QMessageBox.ButtonRole.RejectRole)
             notice.exec()
@@ -2414,7 +2550,9 @@ class MainWindow(DesktopWindow):
             notice.setText(summary)
             notice.setInformativeText("成功商品已写入公共采集箱。失败请查看原因；待核对商品不要重复新增。")
             view = notice.addButton("查看回传记录", QMessageBox.ButtonRole.ActionRole)
-            notice.addButton("返回商品加工", QMessageBox.ButtonRole.RejectRole)
+            # notice.addButton("返回商品加工", QMessageBox.ButtonRole.RejectRole)
+            # 2026-10-15：本次修改原因：回传完成回到统一汇总列表。
+            notice.addButton("关闭结果", QMessageBox.ButtonRole.RejectRole)
             notice.exec()
             if notice.clickedButton() == view:
                 self.show_erp_records()
@@ -2530,6 +2668,10 @@ class MainWindow(DesktopWindow):
         if not product:
             QMessageBox.information(self, "商品不存在", "该记录关联的商品不存在，请检查数据目录。")
             return
+        # 2026-10-15：本次修改原因：先通过当前工作区的未保存检查，取消导航时不改变 ERP 筛选或继续编辑。
+        if not self.navigate(self.PAGE_ERP_RETURN): return
+        product = self.repository.product(product_id)
+        if not product: return
         self.active_filter = "全部"
         self.filters.button(0).setChecked(True)
         self.source_filter.setCurrentIndex(0)
@@ -2541,11 +2683,13 @@ class MainWindow(DesktopWindow):
         # 2026-10-12：本次修改原因：记录跳转后商品速览图片与选中商品一致。
         self.current_product = product
         # 2026-10-13：本次修改原因：日志跳转时切换到商品所属来源，只调整列表定位。
-        self.change_product_source(1 if product.acquisition_route == "upload" else 0, reset_filters=False, render=False)
+        # self.change_product_source(1 if product.acquisition_route == "upload" else 0, reset_filters=False, render=False)
+        # 2026-10-15：本次修改原因：ERP 中定位商品使用全部来源，避免成链商品被过渡上传筛选隐藏。
+        self.change_product_source(2, reset_filters=False, render=False)
         # self.preview.set_url(product.images[0] if product.images else "")
         # 2026-10-13：本次修改原因：记录跳转后只定位商品行，主图由列表委托加载。
         self.refresh()
-        self.navigate(0)
+        # self.navigate(0)
         if edit:
             self.edit_current()
 
@@ -2690,6 +2834,10 @@ class MainWindow(DesktopWindow):
             return
         # 2026-10-13：本次修改原因：关闭应用前同样保护独立爆款方案的未保存编辑。
         if not self.reference_analysis_page.can_leave():
+            event.ignore()
+            return
+        # 2026-10-15：本次修改原因：关闭窗口前保护成链工作区未保存草稿。
+        if not self.bead_chain_page.can_leave():
             event.ignore()
             return
         # 2026-10-13：本次修改原因：退出前保存正常布局和列宽，不保存临时最大化状态。

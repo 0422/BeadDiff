@@ -36,7 +36,9 @@ class AIService:
         self.jobs = JobStore(config.path.parent)
 
     def generate(self, request: AIRequest, progress: Callable[[str], None] | None = None) -> AIResult:
-        category = "image" if request.operation in {"image", "image_set"} else "text"
+        # category = "image" if request.operation in {"image", "image_set"} else "text"
+        # 2026-10-15：本次修改原因：散珠组装图片使用独立任务语义，避免套用保持原成品结构的提示。
+        category = "image" if request.operation in {"image", "image_set", "bead_image"} else "text"
         profile = self.config.get(request.model_id, category)
         if profile.category != category:
             raise ValueError("所选模型类别与当前任务不一致。")
@@ -62,6 +64,10 @@ class AIService:
                          # 2026-10-14：本次修改原因：规划使用文本模型独立输出结构化方案，与实际生图分开调用。
                          "reference_analysis": "分析参考素材的表达、构图、光影、版式和图片用途次序，输出可复用的风格 Prompt",
                          "product_plan": "按用户给定结构返回整商品加工方案 JSON，不生成图片"}
+                # 2026-10-15：本次修改原因：原料观察、设计和 Listing 均真实调用文本模型，使用各自结构化协议。
+                tasks.update({"material_observation":"观察原料外观，区分可见特征与不可推断信息",
+                              "bead_design":"仅从所选原料设计手链配方，输出明确排列和用量",
+                              "bead_listing":"为已锁定设计起草 Listing 参考，不把设计假设写成已验证事实"})
                 if request.operation not in tasks:
                     raise ValueError("当前 AI 功能尚未开放。")
                 old = request.product.get(request.operation, "")
@@ -69,7 +75,9 @@ class AIService:
                 count = max(1, min(request.count, 4))
                 # prompt += f'输出 {count} 个候选，仅返回 JSON：{{"candidates":["候选内容"]}}。'
                 # 2026-10-14：本次修改原因：规划直接返回方案对象，其他文案仍沿用候选格式。
-                if request.operation == "product_plan":
+                # if request.operation == "product_plan":
+                # 2026-10-15：本次修改原因：类目工作流返回严格 JSON 对象，由业务校验器确认后保存。
+                if request.operation in {"product_plan","material_observation","bead_design","bead_listing"}:
                     prompt += "仅输出用户指定结构的 JSON 对象，不包裹 candidates。"
                 else:
                     prompt += f'输出 {count} 个候选，仅返回 JSON：{{"candidates":["候选内容"]}}。'
@@ -77,7 +85,14 @@ class AIService:
                 # if request.operation == "reference_analysis":
                 #     images = list(dict.fromkeys(request.subject_images + images))
                 # 2026-10-11：本次修改原因：文本任务也支持主体图，明确主体与爆款参考的身份。
-                images = list(dict.fromkeys(request.subject_images + request.reference_images))
+                # images = list(dict.fromkeys(request.subject_images + request.reference_images))
+                # 2026-10-15：本次修改原因：不同规格原料可共用一张照片，保留每个原料的参考图序号，避免去重后图文错位。
+                images = (request.subject_images + request.reference_images if request.operation == "bead_design"
+                          else list(dict.fromkeys(request.subject_images + request.reference_images)))
+                # 2026-10-15：本次修改原因：纯文本模型可依据已确认资料设计；图片观察仍要求支持视觉的模型。
+                if request.operation == "bead_design" and images and not profile.supports_vision:
+                    images = []
+                    prompt += "\n当前模型未读取原料图，只能依据已提供的资料及标明来源的观察文本设计。"
                 if images:
                     prompt += (f"\n前 {len(request.subject_images)} 张为当前商品主体；其余为爆款风格参考。"
                                "只能从主体图提取可见事实；参考图只用于风格，不代表当前商品属性。")
@@ -97,8 +112,13 @@ class AIService:
             else:
                 if not request.subject_images:
                     raise ValueError("请指定商品主体图，确保生成内容基于当前实物。")
-                references = list(dict.fromkeys(request.subject_images + request.reference_images))
-                slots = request.slots if request.operation == "image_set" else [request.instruction or "商品图片"] * max(1, min(request.count, 4))
+                # references = list(dict.fromkeys(request.subject_images + request.reference_images))
+                # 2026-10-15：本次修改原因：组装生图保留原料编号对应的图片顺序，允许多个原料规格共用参考照片。
+                references = (request.subject_images + request.reference_images if request.operation == "bead_image"
+                              else list(dict.fromkeys(request.subject_images + request.reference_images)))
+                # slots = request.slots if request.operation == "image_set" else [request.instruction or "商品图片"] * max(1, min(request.count, 4))
+                # 2026-10-15：本次修改原因：成链图片按用途逐张生成，失败时保留已成功图片并由用户选择重试。
+                slots = request.slots if request.operation in {"image_set","bead_image"} else [request.instruction or "商品图片"] * max(1, min(request.count, 4))
                 if not slots or len(slots) > 12:
                     raise ValueError("套图需要 1～12 个图片用途，每行一个；可按行调整生成顺序。")
                 for index, purpose in enumerate(slots):
@@ -108,6 +128,11 @@ class AIService:
                         instruction = (SYSTEM + "\n" + prompt + f"\n本张用途与排布：{purpose}\n"
                             f"前 {len(request.subject_images)} 张为当前商品主体；其余为风格参考。"
                             "保留主体的实物形状、颜色、材质和数量。不要把参考图中的商品主体混入结果。")
+                        # 2026-10-15：本次修改原因：散珠参考是待组装的原料，必须按锁定 BOM 排列形成新的手链。
+                        if request.operation == "bead_image":
+                            instruction = (SYSTEM+"\n"+prompt+f"\n本张用途：{purpose}\n"
+                                           "输入图片按编号对应散珠原料，不是现成手链。按配方组装，准确保留各原料外观、数量和顺序。"
+                                           "输出设计概念图，不添加未经提供的商品、文字承诺、配件或包装。")
                         response = client.image(instruction, references, request.size)
                         sources = image_sources(response)
                         if not sources:

@@ -156,7 +156,9 @@ class AcquisitionRecordsPage(QWidget):
         controls = QHBoxLayout()
         self.raw = button("查看原始数据", self.show_raw)
         self.reparse = button("重新解析", self.parse_again)
-        self.edit = button("进入商品加工", self.open_product, primary=True)
+        # self.edit = button("进入商品加工", self.open_product, primary=True)
+        # 2026-10-15：本次修改原因：历史记录按来源跳转对应编辑页。
+        self.edit = button("编辑商品", self.open_product, primary=True)
         controls.addWidget(self.raw)
         controls.addWidget(self.reparse)
         # 2026-10-12：本次修改原因：两类采集记录可移除、清空当前路线并恢复，商品和原始材料保留。
@@ -218,7 +220,9 @@ class AcquisitionRecordsPage(QWidget):
                 if (current and current["archived"]) or product_id in archived_ids:
                     now = "当前：本机商品在回收站，可恢复后继续加工。"
                 elif current or product_id in active_ids:
-                    now = "当前：本机商品在商品加工列表，可继续加工。"
+                    # now = "当前：本机商品在商品加工列表，可继续加工。"
+                    # 2026-10-15：本次修改原因：商品汇总列表迁至回传 ERP。
+                    now = "当前：本机商品在回传 ERP 列表，可继续编辑。"
                 elif row["state"] in {"imported", "existing"}:
                     now = "当前：本机已无此商品，可重新同步。"
                 else:
@@ -271,7 +275,9 @@ class AcquisitionRecordsPage(QWidget):
         # self.hint.setText(record.get("message", "") if record else "选中记录后可查看原始数据或进入商品加工。")
         # 2026-10-13：本次修改原因：底部提示与说明列使用相同的历史/当前信息，避免残留旧回收站提示。
         self.hint.setText(record.get("display_message", record.get("message", "")) if record else
-                          "选中记录后可查看原始数据或进入商品加工。")
+                          # "选中记录后可查看原始数据或进入商品加工。")
+                          # 2026-10-15：本次修改原因：记录可进入来源对应的编辑页。
+                          "选中记录后可查看原始数据或编辑商品。")
 
     def open_product(self) -> None:
         record = self.selected()
@@ -373,7 +379,9 @@ class ERPRecordsPage(QWidget):
         list_panel.heading_layout.insertWidget(1, self.summary)
         self.detail_splitter.setHandleWidth(12)
         self.detail_splitter.addWidget(list_panel)
-        self.empty = label("暂无回传记录。请在商品加工保存审核后点击“传回 ERP”。", "empty", True)
+        # self.empty = label("暂无回传记录。请在商品加工保存审核后点击“传回 ERP”。", "empty", True)
+        # 2026-10-15：本次修改原因：回传历史空态指向统一的回传 ERP 入口。
+        self.empty = label("暂无回传记录。请在商品编辑页保存审核后，到回传 ERP 点击“传回 ERP”。", "empty", True)
         # contents.addWidget(self.empty)
         list_contents.addWidget(self.empty)
         self.guidance = label("", "hint", True)
@@ -399,7 +407,9 @@ class ERPRecordsPage(QWidget):
         # contents.addWidget(self.detail_splitter, 1)
         layout.addWidget(self.detail_splitter, 1)
         controls = QHBoxLayout()
-        self.edit = button("进入商品加工", self.open_product)
+        # self.edit = button("进入商品加工", self.open_product)
+        # 2026-10-15：本次修改原因：回传记录支持编辑不同来源商品。
+        self.edit = button("编辑商品", self.open_product)
         self.reconcile = button("只读核对未知结果", self.check_unknown, primary=True)
         controls.addWidget(self.edit)
         # 2026-10-12：本次修改原因：回传历史支持当前筛选范围清理，未知/发送中证据保留，支持恢复。
@@ -581,17 +591,36 @@ class HelpPage(QScrollArea):
         #     ("7. 回收站与永久删除", "移除后点击侧栏“回收站”或原列表的回收站按钮。选择商品 / 妙手同步记录 / 插件采集记录 / 回传记录，勾选后“恢复所选”或“永久删除所选”；“清空此类回收站”仅清空当前类型。永久删除有范围提示且不能撤销。商品留在回收站时重复同步不会重建，永久删除商品后下次妙手同步可重新导入；独立回传记录保留。仅删除记录不会删除商品或解除商品去重；永久删除回传记录会一并删除其发送快照和接口回执。原始文件、AI 素材保留，不会删除妙手商品。发送中、未知结果及正在解析条目仍受保护。", "打开回收站", owner.open_recycle_bin),
         # ]
         # 2026-10-14：本次修改原因：帮助按最新设置、完整 Listing、三阶段生成及自动图床链路就地更新。
+        # sections = [
+            # ('1. 统一配置', '底部齿轮进入设置。AI 模型：分别保存文本、图片模型并设为当前，白底图文案需要支持图片理解的文本模型。妙手 ERP：保存 AppKey、AppSecret，确认新增或更新方式及人民币汇率。模型只在设置管理，加工页面直接使用当前配置。', '配置 AI 模型', lambda: owner.open_settings(2)),
+            # ('2. 图床配置与自动上传', '设置 → 图床启用 GitHub + jsDelivr，填写 GitHub 用户名、公开仓库名（不含 .git）、实际分支、目录和 Token。Fine-grained Token 选该仓库并开启 Contents 读写。保存、测试连接；空仓库首传会创建目录，无需手动建目录。检测连接不等于验证上传权限。', '配置图床', lambda: owner.open_settings(owner.SETTINGS_HOSTING)),
+            # ('3. 上传白底图生成完整 Listing', '先在设置 → 白底图 Listing 保存类目、目标语言、主图与详情图数量、整套 Prompt 和建档预设。商品加工 → 上传白底图：添加实物图、确认类目、补已知事实，点击创建并生成完整 Listing；文案、主图、详情图及 SKU 图自动开始生成。仅创建草稿可暂不调用模型。', '配置白底图 Listing', lambda: owner.open_settings(owner.SETTINGS_LISTING)),
+            # ('4. 建档预设与实物信息', '上传商品自动填唯一主编号、SKU 编号、默认规格1、币种、售价、独立货源价、库存和物流预设，避免空字段阻断保存。预设不等于实测信息：保存并审核前在销售属性核对售价与库存，在物流信息核对重量及包装尺寸，在货源链接核对独立货源价。未知材质、品牌、认证等留空，不交给 AI 编造。', '进入商品加工', lambda: owner.navigate(owner.PAGE_PRODUCTS)),
+            # ('5. 三步 AI 加工与重做', '双击商品 → AI 处理：1 整理素材，2 确认方案，3 生成与审核。普通采集商品必须将所需图片设为调整/重做、文案设为改写；输入 Prompt 本身不改变处理范围。第二步底部开始生成显示任务数，点击才调用模型。白底图完整方案已自动设好范围。', '进入商品加工', lambda: owner.navigate(owner.PAGE_PRODUCTS)),
+            # ('6. 生成审核、采用和继续生成', '生成后按主图/详情图/SKU/文案分组查看版本，满意则勾采用此版本；本组批量采用也可用。单项不满意可打开卡片修改 Prompt 后重做，文案用修改要求/重做；旧版本保留。全局修改要求后返回确认方案点击开始生成。部分失败可继续未完成任务；暂停在当前任务结束后生效。', '进入商品加工', lambda: owner.navigate(owner.PAGE_PRODUCTS)),
+            # ('7. 爆款参考方案', '左侧爆款分析可分析参考图和文案，编辑并保存参考 Prompt。AI 页面选择已保存方案后复用；无需每个商品重复分析。当前为基础分析 Demo，ec-visual-skill 尚未接入完整规则。包裹追踪入口暂为占位页。', '打开爆款分析', lambda: owner.navigate(owner.PAGE_REFERENCES)),
+            # ('8. 应用、保存审核与回传', '采用版本后点击应用所选结果，返回手动修改核对，再保存并审核；生成或应用不等于保存。商品加工列表点击传回妙手 ERP。白底图首次选择新增，更新须已关联原商品。成功写入公共采集箱后仍在妙手认领、确认 Temu 类目和渠道要求并发布。', '配置妙手 ERP', lambda: owner.open_settings(1)),
+            # ('9. 图片托管、尺码图与失败处理', '同步 ERP 只上传实际采用的本机主图、详情图、SKU 图及产品尺码图，自动使用新图公网链接再转存妙手；未采用候选不上传，原草稿本地素材保留。内容哈希避免覆写旧链接，相同图片复用缓存并检查可访问性。左侧图床页支持链接复制、检测与重试。身体尺码表尚未适配回传。', '打开图床', lambda: owner.navigate(owner.PAGE_HOSTING)),
+            # ('10. 日志、错误定位与回收站', '错误弹窗的处理位置说明具体页面和字段；完整清单可展开详情。底部笔记本图标打开日志记录 → 回传日志，失败可检查原因；结果未知先核对，不重复新增。底部垃圾桶进入回收站，可恢复移除项；永久删除需确认且不可撤销，清理本机不删除妙手商品。', '查看回传日志', owner.show_erp_records),
+        # ]
+        # 2026-10-15：本次修改原因：帮助按采集、原料设计、统一汇总四模块及当前人工核对流程组织。
         sections = [
-            ('1. 统一配置', '底部齿轮进入设置。AI 模型：分别保存文本、图片模型并设为当前，白底图文案需要支持图片理解的文本模型。妙手 ERP：保存 AppKey、AppSecret，确认新增或更新方式及人民币汇率。模型只在设置管理，加工页面直接使用当前配置。', '配置 AI 模型', lambda: owner.open_settings(2)),
-            ('2. 图床配置与自动上传', '设置 → 图床启用 GitHub + jsDelivr，填写 GitHub 用户名、公开仓库名（不含 .git）、实际分支、目录和 Token。Fine-grained Token 选该仓库并开启 Contents 读写。保存、测试连接；空仓库首传会创建目录，无需手动建目录。检测连接不等于验证上传权限。', '配置图床', lambda: owner.open_settings(owner.SETTINGS_HOSTING)),
-            ('3. 上传白底图生成完整 Listing', '先在设置 → 白底图 Listing 保存类目、目标语言、主图与详情图数量、整套 Prompt 和建档预设。商品加工 → 上传白底图：添加实物图、确认类目、补已知事实，点击创建并生成完整 Listing；文案、主图、详情图及 SKU 图自动开始生成。仅创建草稿可暂不调用模型。', '配置白底图 Listing', lambda: owner.open_settings(owner.SETTINGS_LISTING)),
-            ('4. 建档预设与实物信息', '上传商品自动填唯一主编号、SKU 编号、默认规格1、币种、售价、独立货源价、库存和物流预设，避免空字段阻断保存。预设不等于实测信息：保存并审核前在销售属性核对售价与库存，在物流信息核对重量及包装尺寸，在货源链接核对独立货源价。未知材质、品牌、认证等留空，不交给 AI 编造。', '进入商品加工', lambda: owner.navigate(owner.PAGE_PRODUCTS)),
-            ('5. 三步 AI 加工与重做', '双击商品 → AI 处理：1 整理素材，2 确认方案，3 生成与审核。普通采集商品必须将所需图片设为调整/重做、文案设为改写；输入 Prompt 本身不改变处理范围。第二步底部开始生成显示任务数，点击才调用模型。白底图完整方案已自动设好范围。', '进入商品加工', lambda: owner.navigate(owner.PAGE_PRODUCTS)),
-            ('6. 生成审核、采用和继续生成', '生成后按主图/详情图/SKU/文案分组查看版本，满意则勾采用此版本；本组批量采用也可用。单项不满意可打开卡片修改 Prompt 后重做，文案用修改要求/重做；旧版本保留。全局修改要求后返回确认方案点击开始生成。部分失败可继续未完成任务；暂停在当前任务结束后生效。', '进入商品加工', lambda: owner.navigate(owner.PAGE_PRODUCTS)),
-            ('7. 爆款参考方案', '左侧爆款分析可分析参考图和文案，编辑并保存参考 Prompt。AI 页面选择已保存方案后复用；无需每个商品重复分析。当前为基础分析 Demo，ec-visual-skill 尚未接入完整规则。包裹追踪入口暂为占位页。', '打开爆款分析', lambda: owner.navigate(owner.PAGE_REFERENCES)),
-            ('8. 应用、保存审核与回传', '采用版本后点击应用所选结果，返回手动修改核对，再保存并审核；生成或应用不等于保存。商品加工列表点击传回妙手 ERP。白底图首次选择新增，更新须已关联原商品。成功写入公共采集箱后仍在妙手认领、确认 Temu 类目和渠道要求并发布。', '配置妙手 ERP', lambda: owner.open_settings(1)),
-            ('9. 图片托管、尺码图与失败处理', '同步 ERP 只上传实际采用的本机主图、详情图、SKU 图及产品尺码图，自动使用新图公网链接再转存妙手；未采用候选不上传，原草稿本地素材保留。内容哈希避免覆写旧链接，相同图片复用缓存并检查可访问性。左侧图床页支持链接复制、检测与重试。身体尺码表尚未适配回传。', '打开图床', lambda: owner.navigate(owner.PAGE_HOSTING)),
-            ('10. 日志、错误定位与回收站', '错误弹窗的处理位置说明具体页面和字段；完整清单可展开详情。底部笔记本图标打开日志记录 → 回传日志，失败可检查原因；结果未知先核对，不重复新增。底部垃圾桶进入回收站，可恢复移除项；永久删除需确认且不可撤销，清理本机不删除妙手商品。', '查看回传日志', owner.show_erp_records),
+            ('1. 配置模型和 ERP', '设置 → AI 模型分别配置文本和图片模型并设为当前。AI 观察原料需支持图片理解；纯文字模型可按已填资料设计。设置 → 妙手 ERP 保存凭证、回传方式及人民币汇率。', '配置 AI 模型', lambda: owner.open_settings(2)),
+            ('2. 采集箱加工', '同步妙手采集箱或导入备用插件文件，选择商品进入手动 / AI 编辑。AI 处理沿用整理素材、确认方案、生成与审核三步；采用后应用到表单，再保存商品。重复同步保留本机修改。', '打开采集箱加工', lambda: owner.navigate(owner.PAGE_CAPTURE)),
+            # ('3. 散珠数据库', '每种规格独立编号并上传原料图，填写材质、颜色、尺寸和用途。每个字段分别记录来源和确认状态；图片观察与资料冲突会标出。精确尺寸、孔径和材质成分需资料或实测，不能由照片确认。类目库可新增，其他类目的专用设计模块后续扩展。', '打开散珠数据库', lambda: owner.navigate(owner.PAGE_BEAD_DATABASE)),
+            # 2026-10-15：本次修改原因：模块改名数据库，并说明自动编号、表格直接编辑及观察采用规则。
+            ('3. 数据库', '选择类目后新增原料，编号留空会在保存时自动分配，也可自定义。资料值双击直接多行编辑，长内容可右键完整编辑。表格上方右侧可新增字段或采用外观观察；采用后来源为图片观察。每个字段独立选择来源和状态，精确尺寸、孔径和材质成分仍需资料或实测。类目库可新增，其他类目的专用设计模块后续扩展。', '打开数据库', lambda: owner.navigate(owner.PAGE_BEAD_DATABASE)),
+            ('4. 散珠成链与锁定配方', '勾选原料，可选填客户、地区、价格区间、材料成本上限、成品 / DIY 等条件。AI 提出方向后，人工调整串珠顺序和配件用量，核对 BOM、成本、库存和风险后锁定。沿线占长不是腕围；设计不扣减或预留库存。', '打开散珠成链', lambda: owner.navigate(owner.PAGE_BEAD_CHAIN)),
+            ('5. Listing、图片与商品汇总', '锁定后起草 Listing、按用途生成概念图或上传打样实拍。勾选采用图片，指定主图、详情及当前 SKU，用上下移调整顺序。人工核对配方、图片和文案后汇总至回传 ERP；每份设计生成单 SKU 商品，改款先复制设计。本地汇总成功后还需单独回传。', '继续散珠成链', lambda: owner.navigate(owner.PAGE_BEAD_CHAIN)),
+            ('6. 回传 ERP 与审核', '统一查看采集箱商品、成链商品及旧白底图商品。双击进入对应编辑页，补售价、独立货源价、库存与物流，再保存并审核；成链商品修改图文或规格后需重新对照锁定配方勾选核对。列表保留筛选、显示列、批量审核、回执及批量回传。', '打开回传 ERP', lambda: owner.navigate(owner.PAGE_ERP_RETURN)),
+            ('7. 首次新增、更新与发布', '成链及旧白底图商品首次回传请选择新增；更新需要可靠的原商品关联。确认账号、写回位置、方式和问题清单后提交。成功写入公共采集箱后仍需在妙手认领、确认渠道类目并发布。结果未知先查回执并只读核对。', '配置妙手 ERP', lambda: owner.open_settings(1)),
+            ('8. 图片自动托管', '设置 → 图床配置 GitHub + jsDelivr 并保存、测试。回传时只托管采用的本机主图、详情图、SKU 图和产品尺码图，再转存妙手；原草稿和未采用候选留在本机。图床页可检测、复制链接与重试。视频、认证附件及说明书需另填公网链接。', '配置图床', lambda: owner.open_settings(owner.SETTINGS_HOSTING)),
+            # ('9. 旧白底图入口（过渡保留）', '回传 ERP → 旧白底图（过渡）保留原上传和编辑入口，原配置仍在设置 → 白底图 Listing。新的原料白底图工作流请使用散珠数据库 → 散珠成链；后续验收后再撤下旧入口。', '查看旧入口', lambda: owner.navigate(owner.PAGE_ERP_RETURN)),
+            # 2026-10-15：本次修改原因：帮助中的原料设计入口随模块改名。
+            ('9. 旧白底图入口（过渡保留）', '回传 ERP → 旧白底图（过渡）保留原上传和编辑入口，原配置仍在设置 → 白底图 Listing。新的原料白底图工作流请使用数据库 → 散珠成链；后续验收后再撤下旧入口。', '查看旧入口', lambda: owner.navigate(owner.PAGE_ERP_RETURN)),
+            # ('10. 日志与恢复', '底部日志入口查看采集和回传记录，失败详情附处理位置。回收站支持恢复已移除商品和记录；永久删除需确认。本机清理不删除妙手商品。原料在数据库内归档，不删除锁定设计和商品中的历史快照。', '查看回传日志', owner.show_erp_records),
+            # 2026-10-15：本次修改原因：帮助只描述已提供的界面能力，说明配方快照随设计及商品保留。
+            ('10. 日志与恢复', '底部日志入口查看采集和回传记录，失败详情附处理位置。回收站支持恢复已移除商品和记录；永久删除需确认。本机清理不删除妙手商品。历史配方快照随设计和商品保留。', '查看回传日志', owner.show_erp_records),
         ]
         for title, text, action, callback in sections:
             frame, contents = card()

@@ -168,7 +168,8 @@ class ImageHostingPage(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(12)
         heading = QHBoxLayout()
-        heading.addWidget(label("图床", "pageTitle"))
+        # heading.addWidget(label("图床", "pageTitle"))
+        # 2026-10-15：本次修改原因：侧栏已标识图床模块，内容区从图片范围及上传操作开始，去掉重复页标题。
         heading.addWidget(label("已采用或手动上传的图片", "muted"))
         heading.addStretch()
         heading.addWidget(button("打开图床设置", self.open_settings))

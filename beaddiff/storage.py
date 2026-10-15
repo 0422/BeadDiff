@@ -5,6 +5,8 @@ import hashlib
 import json
 import sqlite3
 import uuid
+# 2026-10-15：本次修改原因：普通商品编辑恢复独立的配方快照，避免确认状态修改污染保存前版本。
+from copy import deepcopy
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
@@ -361,6 +363,26 @@ class Repository:
                                (product.id, product.revision, body, product.updated_at))
         return product
 
+    # 2026-10-15：本次修改原因：同一锁定设计只汇总一次，保留配方快照且不伪造采集记录。
+    def create_design_product(self, product: Product) -> Product:
+        if product.source_route != "bead_chain" or not product.source_ref_id or not product.design_version_id or not product.bom_snapshot.get("bom") or not product.images or not product.bom_snapshot.get("images_confirmed"):
+            raise ValueError("成链商品需要锁定配方、来源项目和已采用的图片")
+        product.id = uuid.uuid5(uuid.NAMESPACE_URL,"beaddiff:design:"+product.source_ref_id+":"+product.design_version_id).hex
+        product.source_id = product.source_ref_id+":"+product.design_version_id
+        product.created_at = product.updated_at = now_iso()
+        product.approved = False; product.revision = 1; product.edit_tracking = True
+        body = json.dumps(product.to_dict(),ensure_ascii=False)
+        with self.connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute("SELECT body FROM products WHERE id=?",(product.id,)).fetchone()
+            # 2026-10-15：本次修改原因：重复汇总不悄悄返回回收站商品，引导用户恢复已存在的同版商品。
+            if connection.execute("SELECT 1 FROM local_hidden WHERE kind='products' AND item_id=?", (product.id,)).fetchone():
+                raise ValueError("该设计版本的商品已在回收站，请先到回收站恢复商品")
+            if row: return Product.from_dict(json.loads(row["body"]))
+            connection.execute("INSERT INTO products VALUES (?,?,?,?,?,?)",(product.id,product.source,product.source_id,product.site,body,product.updated_at))
+            connection.execute("INSERT INTO product_versions VALUES (?,?,?,?)",(product.id,product.revision,body,product.updated_at))
+        return product
+
     # 2026-10-11：本次修改原因：重新解析真实采集材料时只补齐缺失来源字段，不覆盖人工编辑。
     @staticmethod
     def _mark_manual_changes(existing: Product, product: Product) -> None:
@@ -552,7 +574,9 @@ class Repository:
             connection.execute("INSERT INTO product_versions VALUES (?,?,?,?)", (existing.id, existing.revision, body, existing.updated_at))
             return existing, True, summary
 
-    def save_product(self, product: Product, approve: bool = False) -> Product:
+    # def save_product(self, product: Product, approve: bool = False) -> Product:
+    # 2026-10-15：本次修改原因：成链商品编辑图片、文案或规格后，必须在商品编辑页明确重新核对才能审核。
+    def save_product(self, product: Product, approve: bool = False, *, confirm_design_images: bool | None = None) -> Product:
         with self.connection() as connection:
             # 2026-10-10：本次修改原因：并发保存时先锁定事务，再比较版本号以防覆盖。
             connection.execute("BEGIN IMMEDIATE")
@@ -562,6 +586,18 @@ class Repository:
             existing = Product.from_dict(json.loads(row["body"]))
             if existing.revision != product.revision:
                 raise ValueError("商品已被其他操作更新，请关闭编辑窗口并重新打开。")
+            # 2026-10-15：本次修改原因：普通 Listing 编辑不能改换原料来源或锁定配方，审批前即恢复可信快照。
+            # for name in ("source_route","source_ref_id","design_version_id","bom_snapshot"):
+            #     setattr(product,name,getattr(existing,name))
+            # 2026-10-15：本次修改原因：保留来源和配方，当前图片确认由本次内容变动及人工核对共同决定。
+            for name in ("source_route", "source_ref_id", "design_version_id"):
+                setattr(product, name, getattr(existing, name))
+            product.bom_snapshot = deepcopy(existing.bom_snapshot)
+            if product.source_route == "bead_chain":
+                if confirm_design_images is not None:
+                    product.bom_snapshot["images_confirmed"] = bool(confirm_design_images)
+                elif product.design_review_content() != existing.design_review_content():
+                    product.bom_snapshot["images_confirmed"] = False
             # 2026-10-12：本次修改原因：手动/AI 保存检查商品全部已知格式、长度、数量及已填数值，原采集材料仍留档。
             from .miaoshou_mapping import draft_limit_issues
             limits = draft_limit_issues(product, existing)

@@ -248,7 +248,9 @@ class MiaoshouSettingsPage(QWidget):
         self.rates.setPlainText("\n".join(f"{code}={value}" for code, value in sorted(config.cny_rates.items())))
         # self.status.setText(self.adapter.unavailable_reason or "凭证已保存。可测试只读连接，再到商品库进行回传。")
         # 2026-10-12：本次修改原因：设置提示指向同步和商品加工的完整接口流程。
-        self.status.setText(self.adapter.unavailable_reason or "凭证已保存。先测试只读连接，再同步采集箱或在商品加工回传。")
+        # self.status.setText(self.adapter.unavailable_reason or "凭证已保存。先测试只读连接，再同步采集箱或在商品加工回传。")
+        # 2026-10-15：本次修改原因：凭证配置指向拆分后的回传 ERP 模块。
+        self.status.setText(self.adapter.unavailable_reason or "凭证已保存。先测试只读连接，再同步采集箱或在回传 ERP 提交。")
         # 2026-10-13：本次修改原因：加载反馈分别显示在对应配置卡片中。
         self.rates_status.setText("修改后点击右下角“保存汇率”生效。")
 

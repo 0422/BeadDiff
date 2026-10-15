@@ -128,7 +128,9 @@ class MiaoshouImportDialog(QDialog):
         self.progress.hide()
         layout.addWidget(self.progress)
         # self.status = label("尚未查询。导入只读取妙手数据，回传需在商品库另行操作。", "hint", True)
-        self.status = label("尚未查询。先查询采集箱，勾选后导入；随后进入商品加工。", "hint", True)
+        # self.status = label("尚未查询。先查询采集箱，勾选后导入；随后进入商品加工。", "hint", True)
+        # 2026-10-15：本次修改原因：同步后的编辑入口归属采集箱加工。
+        self.status = label("尚未查询。先查询采集箱，勾选后导入；随后进入采集箱加工。", "hint", True)
         layout.addWidget(self.status)
         actions = QHBoxLayout()
         # actions.addWidget(button("勾选本页", lambda: self.check_page(True)))
@@ -140,7 +142,9 @@ class MiaoshouImportDialog(QDialog):
         # actions.addWidget(button("返回商品库", self.reject))
         # 2026-10-12：本次修改原因：导入完成提供进入加工入口，并定位最后导入商品。
         actions.addWidget(button("返回", self.reject))
-        self.enter_button = button("进入商品加工", self.enter_processing)
+        # self.enter_button = button("进入商品加工", self.enter_processing)
+        # 2026-10-15：本次修改原因：同步完成后定位采集箱加工中的商品。
+        self.enter_button = button("进入采集箱加工", self.enter_processing)
         self.enter_button.setEnabled(False)
         actions.addWidget(self.enter_button)
         actions.addWidget(button("导入勾选商品", self.import_selected, primary=True))
@@ -377,11 +381,15 @@ class MiaoshouImportDialog(QDialog):
             self.enter_button.setEnabled(bool(self.last_product_id))
             errors = [f"妙手 ID {row['target_id']}：{row['message']}" for row in rows if row["state"] == "failed"]
             errors += [row["record_error"] for row in rows if row.get("record_error")]
-            self.details.setPlainText("\n".join(errors) if errors else "同步完成。已有商品保留本机修改；进入商品加工继续编辑、AI 加工和审核。")
+            # self.details.setPlainText("\n".join(errors) if errors else "同步完成。已有商品保留本机修改；进入商品加工继续编辑、AI 加工和审核。")
+            # 2026-10-15：本次修改原因：明确采集编辑与 ERP 汇总的入口。
+            self.details.setPlainText("\n".join(errors) if errors else "同步完成。已有商品保留本机修改；进入采集箱加工继续编辑或 AI 加工，完成后到回传 ERP 审核回传。")
             # 2026-10-13：本次修改原因：失败明细展开供用户处理，成功时保持辅助区原来的收起状态。
             if errors:
                 self.details_panel.set_expanded(True)
-            self.status.setText("同步完成，部分失败可重新勾选后重试；完整结果见采集记录。" if errors else "同步完成，可进入商品加工。")
+            # self.status.setText("同步完成，部分失败可重新勾选后重试；完整结果见采集记录。" if errors else "同步完成，可进入商品加工。")
+            # 2026-10-15：本次修改原因：成功反馈使用新的模块名称。
+            self.status.setText("同步完成，部分失败可重新勾选后重试；完整结果见采集记录。" if errors else "同步完成，可进入采集箱加工。")
             self.import_index = self.repository.miaoshou_import_index(self.client.config.account_id)
             self.render_rows()
         self.status.setText(f"准备同步 {len(set(targets))} 个商品，已导入项将直接跳过…")

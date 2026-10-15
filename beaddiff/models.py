@@ -122,6 +122,12 @@ class Product:
     # 2026-10-11：本次修改原因：单规格新增需要独立货源价，不能拿销售金额冒充货源价。
     supply_price: str = ""
 
+    # 2026-10-15：本次修改原因：记录商品来自采集箱或类目设计模块，并保存设计/BOM 快照供回传追溯。
+    source_route: str = ""
+    source_ref_id: str = ""
+    design_version_id: str = ""
+    bom_snapshot: dict[str, Any] = field(default_factory=dict)
+
     # 2026-10-12：本次修改原因：API 导入保留完整详情及来源标记，界面未覆盖的字段不从原始网页重新推断。
     erp_imported: bool = False
     erp_remote_snapshot: dict[str, Any] = field(default_factory=dict)
@@ -132,13 +138,18 @@ class Product:
     # 2026-10-12：本次修改原因：获取方式与货源平台分开展示，兼容现有商品而不改写原数据。
     @property
     def acquisition_route(self) -> str:
+        # 2026-10-15：本次修改原因：真实设计来源独立显示，不将类目设计误认成插件采集或旧白底图。
+        if self.source_route == "bead_chain":
+            return "bead_chain"
         if self.erp_imported:
             return "miaoshou"
         return "upload" if self.source == "upload" else "plugin"
 
     @property
     def acquisition_label(self) -> str:
-        return {"miaoshou": "妙手接口", "plugin": "插件同步", "upload": "自上传"}[self.acquisition_route]
+        # return {"miaoshou": "妙手接口", "plugin": "插件同步", "upload": "自上传"}[self.acquisition_route]
+        # 2026-10-15：本次修改原因：ERP 列表和编辑页提供可追溯的成链来源标签。
+        return {"miaoshou":"妙手接口","plugin":"插件同步","upload":"旧白底图","bead_chain":"散珠成链"}.get(self.acquisition_route,self.acquisition_route)
 
     # 2026-10-11：本次修改原因：文本、图片顺序、属性和可编辑 SKU 共用实际内容比较；排除预览缓存和来源只读价格。
     def business_content(self) -> dict[str, Any]:
@@ -153,6 +164,18 @@ class Product:
         sku_names = ("platform_sku", "spec1", "spec2", "price", "currency", "image", "stock", "weight", "dimensions", "specs")
         result = {name: getattr(self, name) for name in names}
         result["skus"] = [{name: getattr(sku, name) for name in sku_names} for sku in self.skus]
+        # 2026-10-15：本次修改原因：设计快照变化纳入审核与回传指纹；旧商品空字段不改变原有回传状态。
+        if self.source_route:
+            result.update({"source_route":self.source_route,"source_ref_id":self.source_ref_id,"design_version_id":self.design_version_id,"bom_snapshot":self.bom_snapshot})
+        return result
+
+    # 2026-10-15：本次修改原因：图片、规格和宣传内容变化后重新核对锁定配方，售价及库存变化不重复要求图片确认。
+    def design_review_content(self) -> dict[str, Any]:
+        names = ("title", "description", "simple_description", "description_html", "category", "attributes",
+                 "images", "detail_images", "spec1_name", "spec2_name")
+        result = {name: getattr(self, name) for name in names}
+        result["skus"] = [{name: getattr(sku, name) for name in ("platform_sku", "spec1", "spec2", "specs", "image")}
+                          for sku in self.skus]
         return result
 
     @property
@@ -192,6 +215,12 @@ class Product:
     # 2026-10-12：本次修改原因：API 增量审核可传入导入基线，只校验改动字段；表格导出仍使用完整检查。
     def issues(self, original: Product | None = None) -> list[str]:
         result = []
+        # 2026-10-15：本次修改原因：成链商品审核和两种 ERP 回传方式都要求保留锁定配方与人工图片核对。
+        if self.source_route == "bead_chain":
+            if not self.source_ref_id or not self.design_version_id or not self.bom_snapshot.get("bom"):
+                result.append("成链商品缺少锁定的设计和配方快照")
+            if not self.bom_snapshot.get("images_confirmed"):
+                result.append("成链商品尚未人工核对采用图片与配方")
         def changed(name: str) -> bool:
             return original is None or getattr(self, name) != getattr(original, name)
         original_skus = {sku.identity: sku for sku in original.skus} if original else {}

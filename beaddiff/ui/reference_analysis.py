@@ -93,7 +93,9 @@ class ReferenceAnalysisPage(QWidget):
         contents.addLayout(model_row)
         # contents.addWidget(label("使用内置电商视觉分析指引，提炼光感、排布、文案结构和图片次序；当前未接入 ec-visual-skill 原文。", "hint", True))
         # 2026-10-13：本次修改原因：页面说明关注操作用途，第三方接入边界在交付说明中记录。
-        contents.addWidget(label("提炼光感、排布、文案结构和图片次序。分析后可编辑参考 Prompt，保存供商品加工复用。", "hint", True))
+        # contents.addWidget(label("提炼光感、排布、文案结构和图片次序。分析后可编辑参考 Prompt，保存供商品加工复用。", "hint", True))
+        # 2026-10-15：本次修改原因：参考方案继续用于采集箱的既有 AI 操作链。
+        contents.addWidget(label("提炼光感、排布、文案结构和图片次序。分析后可编辑参考 Prompt，保存供采集箱加工复用。", "hint", True))
         contents.addStretch()
         self.tabs.addTab(scroll_content(inputs), "参考素材")
         output = QWidget()
@@ -102,7 +104,9 @@ class ReferenceAnalysisPage(QWidget):
         # self.prompt = QPlainTextEdit()
         # 2026-10-14：本次修改原因：分析结果和手动 Prompt 长文保持可见且不挤出底部操作。
         self.prompt = AutoHeightTextEdit(maximum_lines=12)
-        self.prompt.setPlaceholderText("分析结果显示在这里，可手动编辑，也可直接粘贴现成 Prompt。保存后可在商品加工 → AI 处理 → Prompt 方案中选择。")
+        # self.prompt.setPlaceholderText("分析结果显示在这里，可手动编辑，也可直接粘贴现成 Prompt。保存后可在商品加工 → AI 处理 → Prompt 方案中选择。")
+        # 2026-10-15：本次修改原因：参考方案使用说明更新模块入口。
+        self.prompt.setPlaceholderText("分析结果显示在这里，可手动编辑，也可直接粘贴现成 Prompt。保存后可在采集箱加工 → AI 处理 → Prompt 方案中选择。")
         output_layout.addWidget(self.prompt, 1)
         self.tabs.addTab(output, "参考 Prompt")
         right.addWidget(self.tabs, 1)
@@ -248,7 +252,9 @@ class ReferenceAnalysisPage(QWidget):
         self.identifier = row["id"]
         self.baseline = self.snapshot()
         self.refresh()
-        self.status.setText("已保存，可在商品加工 → AI 处理 → Prompt 方案中选择。")
+        # self.status.setText("已保存，可在商品加工 → AI 处理 → Prompt 方案中选择。")
+        # 2026-10-15：本次修改原因：保存反馈与新的采集箱入口一致。
+        self.status.setText("已保存，可在采集箱加工 → AI 处理 → Prompt 方案中选择。")
         return True
 
     def delete_record(self):
